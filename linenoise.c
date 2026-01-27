@@ -292,6 +292,7 @@ struct linenoise_context {
     /* Configuration */
     int maskmode;
     int mlmode;
+    int mousemode;
 
     /* History */
     int history_max_len;
@@ -302,12 +303,14 @@ struct linenoise_context {
     linenoise_completion_cb_t *completion_callback;
     linenoise_hints_cb_t *hints_callback;
     linenoise_free_hints_cb_t *free_hints_callback;
+    linenoise_highlight_cb_t *highlight_callback;
 };
 
 /* Internal global variables used by the editing functions. */
 static linenoise_completion_cb_t *completion_callback = NULL;
 static linenoise_hints_cb_t *hints_callback = NULL;
 static linenoise_free_hints_cb_t *free_hints_callback = NULL;
+static linenoise_highlight_cb_t *highlight_callback = NULL;
 #ifdef _WIN32
 static DWORD orig_console_mode; /* In order to restore at exit.*/
 #else
@@ -316,6 +319,7 @@ static struct termios orig_termios; /* In order to restore at exit.*/
 static int maskmode = 0; /* Show "***" instead of input. For passwords. */
 static int rawmode = 0; /* For atexit() function to check if restore is needed*/
 static int mlmode = 0;  /* Multi line mode. Default is single line. */
+static int mousemode = 0; /* Mouse tracking mode. */
 static int atexit_registered = 0; /* Register atexit just 1 time. */
 static int history_max_len = LINENOISE_DEFAULT_HISTORY_MAX_LEN;
 static int history_len = 0;
@@ -573,6 +577,22 @@ static int read_byte_with_timeout(int fd, char *c, int timeout_ms) {
 }
 
 #endif /* _WIN32 */
+
+/* Enable mouse tracking mode. Sends escape sequences to enable X10 mouse
+ * reporting with SGR extended coordinates. */
+static void enable_mouse_tracking(int fd) {
+    /* \x1b[?1000h - Enable X10 mouse reporting (button press)
+     * \x1b[?1002h - Enable cell motion mouse tracking (drag events)
+     * \x1b[?1006h - Enable SGR extended mouse mode (better coordinate encoding) */
+    const char *seq = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+    if (write(fd, seq, strlen(seq)) == -1) { /* Ignore errors */ }
+}
+
+/* Disable mouse tracking mode. */
+static void disable_mouse_tracking(int fd) {
+    const char *seq = "\x1b[?1006l\x1b[?1002l\x1b[?1000l";
+    if (write(fd, seq, strlen(seq)) == -1) { /* Ignore errors */ }
+}
 
 #ifdef _WIN32
 
@@ -847,6 +867,64 @@ static void ab_free(struct abuf *ab) {
     ln_free(ab->b);
 }
 
+/* Helper to append text with syntax highlighting.
+ * If highlight_callback is set, calls it to get colors for each byte,
+ * then outputs the text with appropriate ANSI color codes.
+ * Color values: 0=default, 1=red, 2=green, 3=yellow, 4=blue, 5=magenta, 6=cyan, 7=white
+ * Add 8 for bold (e.g., 9=bold red). */
+static void ab_append_highlighted(struct abuf *ab, const char *buf, size_t len) {
+    char seq[32];
+    char *colors = NULL;
+    size_t i;
+    int cur_color = 0;
+
+    if (!highlight_callback || len == 0) {
+        ab_append(ab, buf, (int)len);
+        return;
+    }
+
+    /* Allocate and zero the colors array. */
+    colors = ln_malloc(len);
+    if (!colors) {
+        ab_append(ab, buf, (int)len);
+        return;
+    }
+    memset(colors, 0, len);
+
+    /* Call the highlight callback. */
+    highlight_callback(buf, colors, len);
+
+    /* Output text with color changes. */
+    for (i = 0; i < len; i++) {
+        int new_color = (unsigned char)colors[i];
+        if (new_color != cur_color) {
+            /* Output color change sequence. */
+            if (new_color == 0) {
+                /* Reset to default. */
+                ab_append(ab, "\x1b[0m", 4);
+            } else {
+                int bold = (new_color & 8) ? 1 : 0;
+                int fg = 30 + (new_color & 7);  /* 31-37 */
+                if (bold) {
+                    snprintf(seq, sizeof(seq), "\x1b[1;%dm", fg);
+                } else {
+                    snprintf(seq, sizeof(seq), "\x1b[%dm", fg);
+                }
+                ab_append(ab, seq, (int)strlen(seq));
+            }
+            cur_color = new_color;
+        }
+        ab_append(ab, buf + i, 1);
+    }
+
+    /* Reset color at the end if we changed it. */
+    if (cur_color != 0) {
+        ab_append(ab, "\x1b[0m", 4);
+    }
+
+    ln_free(colors);
+}
+
 /* Helper of refresh_single_line() and refresh_multi_line() to show hints
  * to the right of the prompt. Now uses display widths for proper UTF-8. */
 void refresh_show_hints(struct abuf *ab, linenoise_state_t *l, int pwidth) {
@@ -948,7 +1026,7 @@ static void refresh_single_line(linenoise_state_t *l, int flags) {
                 i += utf8NextCharLen(buf, i, len);
             }
         } else {
-            ab_append(&ab,buf,len);
+            ab_append_highlighted(&ab,buf,len);
         }
         /* Show hints if any. */
         refresh_show_hints(&ab,l,pwidth);
@@ -1029,7 +1107,7 @@ static void refresh_multi_line(linenoise_state_t *l, int flags) {
                 i += utf8NextCharLen(l->buf, i, l->len);
             }
         } else {
-            ab_append(&ab,l->buf,l->len);
+            ab_append_highlighted(&ab,l->buf,l->len);
         }
 
         /* Show hints if any. */
@@ -1114,35 +1192,53 @@ void linenoise_show(linenoise_state_t *l) {
  *
  * On error writing to the terminal -1 is returned, otherwise 0. */
 int linenoise_edit_insert(linenoise_state_t *l, const char *c, size_t clen) {
-    if (l->len + clen <= l->buflen) {
-        if (l->len == l->pos) {
-            /* Append at end of line. */
-            memcpy(l->buf+l->pos, c, clen);
-            l->pos += clen;
-            l->len += clen;
-            l->buf[l->len] = '\0';
-            if ((!mlmode &&
-                 utf8StrWidth(l->prompt,l->plen)+utf8StrWidth(l->buf,l->len) < l->cols &&
-                 !hints_callback)) {
-                /* Avoid a full update of the line in the trivial case:
-                 * single-width char, no hints, fits in one line. */
-                if (maskmode == 1) {
-                    if (write(l->ofd,"*",1) == -1) return -1;
-                } else {
-                    if (write(l->ofd,c,clen) == -1) return -1;
-                }
+    /* Check if we need to grow the buffer (dynamic mode only). */
+    if (l->len + clen > l->buflen) {
+        if (l->buf_dynamic) {
+            /* Grow buffer: double the size or add at least the needed space. */
+            size_t newsize = l->buflen * 2;
+            if (newsize < l->len + clen + 1) {
+                newsize = l->len + clen + 1;
+            }
+            char *newbuf = ln_realloc(l->buf, newsize);
+            if (newbuf == NULL) {
+                return -1;  /* Out of memory */
+            }
+            l->buf = newbuf;
+            l->buflen = newsize - 1;  /* Reserve space for null terminator */
+        } else {
+            /* Fixed buffer, can't grow - silently ignore. */
+            return 0;
+        }
+    }
+
+    if (l->len == l->pos) {
+        /* Append at end of line. */
+        memcpy(l->buf+l->pos, c, clen);
+        l->pos += clen;
+        l->len += clen;
+        l->buf[l->len] = '\0';
+        if ((!mlmode &&
+             utf8StrWidth(l->prompt,l->plen)+utf8StrWidth(l->buf,l->len) < l->cols &&
+             !hints_callback)) {
+            /* Avoid a full update of the line in the trivial case:
+             * single-width char, no hints, fits in one line. */
+            if (maskmode == 1) {
+                if (write(l->ofd,"*",1) == -1) return -1;
             } else {
-                refresh_line(l);
+                if (write(l->ofd,c,clen) == -1) return -1;
             }
         } else {
-            /* Insert in the middle of the line. */
-            memmove(l->buf+l->pos+clen, l->buf+l->pos, l->len-l->pos);
-            memcpy(l->buf+l->pos, c, clen);
-            l->len += clen;
-            l->pos += clen;
-            l->buf[l->len] = '\0';
             refresh_line(l);
         }
+    } else {
+        /* Insert in the middle of the line. */
+        memmove(l->buf+l->pos+clen, l->buf+l->pos, l->len-l->pos);
+        memcpy(l->buf+l->pos, c, clen);
+        l->len += clen;
+        l->pos += clen;
+        l->buf[l->len] = '\0';
+        refresh_line(l);
     }
     return 0;
 }
@@ -1175,6 +1271,32 @@ void linenoise_edit_move_home(linenoise_state_t *l) {
 void linenoise_edit_move_end(linenoise_state_t *l) {
     if (l->pos != l->len) {
         l->pos = l->len;
+        refresh_line(l);
+    }
+}
+
+/* Move cursor to a specific display column within the buffer.
+ * col is 0-based column position relative to start of buffer (not prompt).
+ * Used for mouse click positioning. */
+static void linenoise_edit_move_to_column(linenoise_state_t *l, int col) {
+    size_t pos = 0;
+    int current_col = 0;
+
+    /* Walk through the buffer counting display columns until we reach
+     * the target column or end of buffer. */
+    while (pos < l->len && current_col < col) {
+        size_t clen = utf8NextCharLen(l->buf, pos, l->len);
+        int cwidth = utf8SingleCharWidth(l->buf + pos, clen);
+        /* If this character would put us past the target, stop before it. */
+        if (current_col + cwidth > col) {
+            break;
+        }
+        current_col += cwidth;
+        pos += clen;
+    }
+
+    if (l->pos != pos) {
+        l->pos = pos;
         refresh_line(l);
     }
 }
@@ -1413,9 +1535,11 @@ static struct {
     int active;
     int maskmode;
     int mlmode;
+    int mousemode;
     linenoise_completion_cb_t *completion_callback;
     linenoise_hints_cb_t *hints_callback;
     linenoise_free_hints_cb_t *free_hints_callback;
+    linenoise_highlight_cb_t *highlight_callback;
     int history_len;
     int history_max_len;
     char **history;
@@ -1434,6 +1558,7 @@ static int edit_start(linenoise_state_t *l, int stdin_fd, int stdout_fd, char *b
     l->ofd = stdout_fd != -1 ? stdout_fd : STDOUT_FILENO;
     l->buf = buf;
     l->buflen = buflen;
+    l->buf_dynamic = 0;  /* Fixed buffer by default */
     l->prompt = prompt;
     l->plen = strlen(prompt);
     l->oldpos = l->pos = 0;
@@ -1441,6 +1566,11 @@ static int edit_start(linenoise_state_t *l, int stdin_fd, int stdout_fd, char *b
 
     /* Enter raw mode. */
     if (enable_raw_mode(l->ifd) == -1) return -1;
+
+    /* Enable mouse tracking if requested. */
+    if (mousemode) {
+        enable_mouse_tracking(l->ofd);
+    }
 
     l->cols = get_columns(stdin_fd, stdout_fd);
     l->oldrows = 0;
@@ -1478,9 +1608,11 @@ int linenoise_edit_start(linenoise_context_t *ctx, linenoise_state_t *l,
     edit_saved_state.active = 1;
     edit_saved_state.maskmode = maskmode;
     edit_saved_state.mlmode = mlmode;
+    edit_saved_state.mousemode = mousemode;
     edit_saved_state.completion_callback = completion_callback;
     edit_saved_state.hints_callback = hints_callback;
     edit_saved_state.free_hints_callback = free_hints_callback;
+    edit_saved_state.highlight_callback = highlight_callback;
     edit_saved_state.history_len = history_len;
     edit_saved_state.history_max_len = history_max_len;
     edit_saved_state.history = history;
@@ -1489,14 +1621,56 @@ int linenoise_edit_start(linenoise_context_t *ctx, linenoise_state_t *l,
     /* Set global state from context. */
     maskmode = ctx->maskmode;
     mlmode = ctx->mlmode;
+    mousemode = ctx->mousemode;
     completion_callback = ctx->completion_callback;
     hints_callback = ctx->hints_callback;
     free_hints_callback = ctx->free_hints_callback;
+    highlight_callback = ctx->highlight_callback;
     history_len = ctx->history_len;
     history_max_len = ctx->history_max_len;
     history = ctx->history;
 
     return edit_start(l, stdin_fd, stdout_fd, buf, buflen, prompt);
+}
+
+/* Start editing with a dynamically-sized buffer.
+ * Unlike linenoise_edit_start(), this allocates its own buffer that grows
+ * automatically as needed. The buffer is freed when linenoise_edit_stop()
+ * is called, and the returned line from linenoise_edit_feed() should be
+ * freed with linenoise_free().
+ *
+ * initial_size: Starting buffer size (will grow as needed). Use 0 for default.
+ * Returns 0 on success, -1 on error. */
+int linenoise_edit_start_dynamic(linenoise_context_t *ctx, linenoise_state_t *l,
+                                 int stdin_fd, int stdout_fd,
+                                 size_t initial_size, const char *prompt) {
+    char *buf;
+
+    if (!ctx) return -1;
+
+    /* Use default initial size if not specified. */
+    if (initial_size == 0) {
+        initial_size = 256;
+    }
+
+    /* Allocate the initial buffer. */
+    buf = ln_malloc(initial_size);
+    if (buf == NULL) {
+        set_error(LINENOISE_ERR_MEMORY);
+        return -1;
+    }
+    buf[0] = '\0';
+
+    /* Start editing with the allocated buffer. */
+    int result = linenoise_edit_start(ctx, l, stdin_fd, stdout_fd, buf, initial_size, prompt);
+    if (result == -1) {
+        ln_free(buf);
+        return -1;
+    }
+
+    /* Mark buffer as dynamic so it will be auto-grown and freed. */
+    l->buf_dynamic = 1;
+    return 0;
 }
 
 char *linenoise_edit_more = "If you see this, you are misusing the API: when linenoise_edit_feed() is called, if it returns linenoise_edit_more the user is yet editing the line. See the README file for more information.";
@@ -1619,7 +1793,46 @@ char *linenoise_edit_feed(linenoise_state_t *l) {
 
         /* ESC [ sequences. */
         if (seq[0] == '[') {
-            if (seq[1] >= '0' && seq[1] <= '9') {
+            /* SGR mouse event: ESC [ < button ; x ; y M/m */
+            if (seq[1] == '<' && mousemode) {
+                /* Read the rest of the mouse sequence. */
+                char mouse_seq[32];
+                int mi = 0;
+                while (mi < 30) {
+                    if (read_byte_with_timeout(l->ifd, &mouse_seq[mi], 100) != 1) break;
+                    if (mouse_seq[mi] == 'M' || mouse_seq[mi] == 'm') {
+                        mouse_seq[mi+1] = '\0';
+                        break;
+                    }
+                    mi++;
+                }
+                if (mi > 0 && (mouse_seq[mi] == 'M' || mouse_seq[mi] == 'm')) {
+                    /* Parse: button;x;y */
+                    int button = 0, x = 0, y = 0;
+                    char *p = mouse_seq;
+                    button = atoi(p);
+                    while (*p && *p != ';') p++;
+                    if (*p == ';') { p++; x = atoi(p); }
+                    while (*p && *p != ';') p++;
+                    if (*p == ';') { p++; y = atoi(p); }
+                    (void)y;  /* Row not used for single-line mode */
+
+                    /* Handle left button press (button 0) for click-to-position.
+                     * x is 1-based terminal column. Subtract prompt width to get
+                     * position within the edit buffer. */
+                    if (button == 0 && mouse_seq[mi] == 'M') {
+                        int pwidth = (int)utf8StrWidth(l->prompt, l->plen);
+                        int col = x - 1 - pwidth;  /* Convert to 0-based buffer column */
+                        if (col >= 0) {
+                            linenoise_edit_move_to_column(l, col);
+                        } else {
+                            /* Click was on prompt, move to start. */
+                            linenoise_edit_move_home(l);
+                        }
+                    }
+                }
+            }
+            else if (seq[1] >= '0' && seq[1] <= '9') {
                 /* Extended escape, read additional byte. */
                 if (read_byte_with_timeout(l->ifd,seq+2,100) != 1) break;
                 if (seq[2] == '~') {
@@ -1765,6 +1978,10 @@ char *linenoise_edit_feed(linenoise_state_t *l) {
 /* Internal: Stop editing (restores terminal). */
 static void edit_stop(linenoise_state_t *l) {
     if (!isatty(l->ifd) && !getenv("LINENOISE_ASSUME_TTY")) return;
+    /* Disable mouse tracking before restoring terminal. */
+    if (mousemode) {
+        disable_mouse_tracking(l->ofd);
+    }
     disable_raw_mode(l->ifd);
     printf("\n");
 }
@@ -1774,6 +1991,13 @@ static void edit_stop(linenoise_state_t *l) {
  * linenoise_edit_feed() returns something other than linenoise_edit_more. */
 void linenoise_edit_stop(linenoise_state_t *l) {
     edit_stop(l);
+
+    /* Free dynamic buffer if allocated by linenoise_edit_start_dynamic(). */
+    if (l->buf_dynamic && l->buf) {
+        ln_free(l->buf);
+        l->buf = NULL;
+        l->buf_dynamic = 0;
+    }
 
     /* Restore global state if we're in an active edit session. */
     if (edit_saved_state.active) {
@@ -1786,9 +2010,11 @@ void linenoise_edit_stop(linenoise_state_t *l) {
         /* Restore previous global state. */
         maskmode = edit_saved_state.maskmode;
         mlmode = edit_saved_state.mlmode;
+        mousemode = edit_saved_state.mousemode;
         completion_callback = edit_saved_state.completion_callback;
         hints_callback = edit_saved_state.hints_callback;
         free_hints_callback = edit_saved_state.free_hints_callback;
+        highlight_callback = edit_saved_state.highlight_callback;
         history_len = edit_saved_state.history_len;
         history_max_len = edit_saved_state.history_max_len;
         history = edit_saved_state.history;
@@ -1993,12 +2219,14 @@ linenoise_context_t *linenoise_context_create(void) {
     ctx->atexit_registered = 0;
     ctx->maskmode = 0;
     ctx->mlmode = 0;
+    ctx->mousemode = 0;
     ctx->history_max_len = LINENOISE_DEFAULT_HISTORY_MAX_LEN;
     ctx->history_len = 0;
     ctx->history = NULL;
     ctx->completion_callback = NULL;
     ctx->hints_callback = NULL;
     ctx->free_hints_callback = NULL;
+    ctx->highlight_callback = NULL;
 
     return ctx;
 }
@@ -2028,6 +2256,11 @@ void linenoise_set_mask_mode(linenoise_context_t *ctx, int enable) {
     if (ctx) ctx->maskmode = enable;
 }
 
+/* Set mouse mode for a context (click to position cursor). */
+void linenoise_set_mouse_mode(linenoise_context_t *ctx, int enable) {
+    if (ctx) ctx->mousemode = enable;
+}
+
 /* Set completion callback for a context. */
 void linenoise_set_completion_callback(linenoise_context_t *ctx, linenoise_completion_cb_t *fn) {
     if (ctx) ctx->completion_callback = fn;
@@ -2041,6 +2274,11 @@ void linenoise_set_hints_callback(linenoise_context_t *ctx, linenoise_hints_cb_t
 /* Set free hints callback for a context. */
 void linenoise_set_free_hints_callback(linenoise_context_t *ctx, linenoise_free_hints_cb_t *fn) {
     if (ctx) ctx->free_hints_callback = fn;
+}
+
+/* Set syntax highlighting callback for a context. */
+void linenoise_set_highlight_callback(linenoise_context_t *ctx, linenoise_highlight_cb_t *fn) {
+    if (ctx) ctx->highlight_callback = fn;
 }
 
 /* Add a line to history for a context. */
@@ -2159,15 +2397,19 @@ char *linenoise_read(linenoise_context_t *ctx, const char *prompt) {
      * with internal functions. This is a transitional approach. */
     int saved_maskmode = maskmode;
     int saved_mlmode = mlmode;
+    int saved_mousemode = mousemode;
     linenoise_completion_cb_t *saved_completion = completion_callback;
     linenoise_hints_cb_t *saved_hints = hints_callback;
     linenoise_free_hints_cb_t *saved_freehints = free_hints_callback;
+    linenoise_highlight_cb_t *saved_highlight = highlight_callback;
 
     maskmode = ctx->maskmode;
     mlmode = ctx->mlmode;
+    mousemode = ctx->mousemode;
     completion_callback = ctx->completion_callback;
     hints_callback = ctx->hints_callback;
     free_hints_callback = ctx->free_hints_callback;
+    highlight_callback = ctx->highlight_callback;
 
     /* Also temporarily swap history. */
     int saved_history_len = history_len;
@@ -2187,9 +2429,11 @@ char *linenoise_read(linenoise_context_t *ctx, const char *prompt) {
     /* Restore global state. */
     maskmode = saved_maskmode;
     mlmode = saved_mlmode;
+    mousemode = saved_mousemode;
     completion_callback = saved_completion;
     hints_callback = saved_hints;
     free_hints_callback = saved_freehints;
+    highlight_callback = saved_highlight;
     history_len = saved_history_len;
     history_max_len = saved_history_max_len;
     history = saved_history;

@@ -99,6 +99,22 @@ and context-based state management. The legacy camelCase global API has been rem
   - Automatic state saving before destructive operations
   - Up to 100 undo levels
 - Page Up/Down mapped to history navigation
+- Syntax highlighting support
+  - `linenoise_highlight_cb_t` callback type for colorizing input
+  - `linenoise_set_highlight_callback()` to register highlighting function
+  - Supports 8 colors (red, green, yellow, blue, magenta, cyan, white, default)
+  - Bold attribute available (add 8 to color code)
+  - Works with both single-line and multi-line modes
+- Dynamic buffer support
+  - `linenoise_edit_start_dynamic()` - Start editing with auto-growing buffer
+  - Buffer automatically doubles in size when more space is needed
+  - No fixed line length limit when using dynamic mode
+  - Buffer is automatically freed when `linenoise_edit_stop()` is called
+- Mouse support
+  - `linenoise_set_mouse_mode()` - Enable/disable mouse tracking
+  - Click to position cursor within the edit buffer
+  - Uses SGR extended mouse mode for accurate coordinate reporting
+  - Automatically enabled/disabled with raw mode
 
 #### Windows Support
 - Added Windows 10+ support using Virtual Terminal (VT) mode

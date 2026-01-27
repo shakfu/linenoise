@@ -106,6 +106,16 @@ typedef void (linenoise_completion_cb_t)(const char *buf, linenoise_completions_
 typedef char *(linenoise_hints_cb_t)(const char *buf, int *color, int *bold);
 typedef void (linenoise_free_hints_cb_t)(void *hint);
 
+/* Syntax highlighting callback.
+ * Called with the current buffer contents. The callback should fill the
+ * colors array with color codes for each byte position:
+ *   0 = default (no color)
+ *   1 = red, 2 = green, 3 = yellow, 4 = blue,
+ *   5 = magenta, 6 = cyan, 7 = white
+ * Add 8 to make the color bold (e.g., 9 = bold red).
+ * The colors array is pre-zeroed and has the same length as buf. */
+typedef void (linenoise_highlight_cb_t)(const char *buf, char *colors, size_t len);
+
 /* Opaque context structure. Each context has independent history, callbacks,
  * and settings. Thread-safe when using separate contexts per thread. */
 typedef struct linenoise_context linenoise_context_t;
@@ -118,6 +128,7 @@ typedef struct linenoise_state {
     int ofd;
     char *buf;
     size_t buflen;
+    int buf_dynamic;    /* If true, buffer auto-grows and is owned by state */
     const char *prompt;
     size_t plen;
     size_t pos;
@@ -138,9 +149,11 @@ void linenoise_context_destroy(linenoise_context_t *ctx);
 
 void linenoise_set_multiline(linenoise_context_t *ctx, int enable);
 void linenoise_set_mask_mode(linenoise_context_t *ctx, int enable);
+void linenoise_set_mouse_mode(linenoise_context_t *ctx, int enable);
 void linenoise_set_completion_callback(linenoise_context_t *ctx, linenoise_completion_cb_t *fn);
 void linenoise_set_hints_callback(linenoise_context_t *ctx, linenoise_hints_cb_t *fn);
 void linenoise_set_free_hints_callback(linenoise_context_t *ctx, linenoise_free_hints_cb_t *fn);
+void linenoise_set_highlight_callback(linenoise_context_t *ctx, linenoise_highlight_cb_t *fn);
 
 /* ===== Blocking API ===== */
 
@@ -151,6 +164,9 @@ char *linenoise_read(linenoise_context_t *ctx, const char *prompt);
 int linenoise_edit_start(linenoise_context_t *ctx, linenoise_state_t *state,
                          int stdin_fd, int stdout_fd,
                          char *buf, size_t buflen, const char *prompt);
+int linenoise_edit_start_dynamic(linenoise_context_t *ctx, linenoise_state_t *state,
+                                 int stdin_fd, int stdout_fd,
+                                 size_t initial_size, const char *prompt);
 char *linenoise_edit_feed(linenoise_state_t *state);
 void linenoise_edit_stop(linenoise_state_t *state);
 void linenoise_hide(linenoise_state_t *state);

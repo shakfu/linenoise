@@ -264,25 +264,26 @@ Prioritized task list derived from architectural review. Items ordered by depend
 
 ### 5.2 Mouse Support
 
-- [ ] **Enable mouse tracking**
-- [ ] **Click to position cursor**
-- [ ] **Selection support**
+- [x] **Enable mouse tracking**
+- [x] **Click to position cursor**
+- [ ] **Selection support** (deferred - requires clipboard integration)
 
 ### 5.3 Dynamic Buffer
 
-- [ ] **Auto-growing edit buffer**
+- [x] **Auto-growing edit buffer**
   ```c
-  int linenoiseEditStartDynamic(linenoiseState *l, int ifd, int ofd,
-                                size_t initial_size, const char *prompt);
+  int linenoise_edit_start_dynamic(linenoise_context_t *ctx, linenoise_state_t *l,
+                                   int stdin_fd, int stdout_fd,
+                                   size_t initial_size, const char *prompt);
   ```
 
 ### 5.4 Syntax Highlighting
 
-- [ ] **Callback for colorizing input**
+- [x] **Callback for colorizing input**
   ```c
-  typedef void (*linenoiseHighlightCallback)(
+  typedef void (*linenoise_highlight_cb_t)(
       const char *buf, char *colors, size_t len);
-  void linenoiseSetHighlightCallback(linenoiseHighlightCallback fn);
+  void linenoise_set_highlight_callback(linenoise_context_t *ctx, linenoise_highlight_cb_t *fn);
   ```
 
 ### 5.5 Undo/Redo
@@ -334,5 +335,5 @@ linenoise/
 | P2       | Windows Support         | 8     | 6    |
 | P3       | Modularization          | 14    | 8    |
 | P4       | Code Quality            | 5     | 4    |
-| P5       | Enhancements            | 13    | 7    |
-| **Total**|                         | **55**| **39**|
+| P5       | Enhancements            | 13    | 11   |
+| **Total**|                         | **55**| **43**|

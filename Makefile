@@ -1,67 +1,84 @@
-CC ?= cc
-CFLAGS = -Wall -W -Os -g
+# Makefile - Frontend to CMake build system
+#
+# This Makefile provides a simple interface to the CMake build system.
+# All actual build logic is in CMakeLists.txt.
 
-# Source files
-UTF8_SRC = src/utf8.c
-TERMINAL_SRC = src/terminal_posix.c
-HISTORY_SRC = src/history.c
-COMPLETION_SRC = src/completion.c
-KEYPARSER_SRC = src/keyparser.c
-RENDER_SRC = src/render.c
-LINENOISE_SRC = linenoise.c
+BUILD_DIR ?= build
+CMAKE ?= cmake
+CMAKE_BUILD_TYPE ?= Release
 
-# Object files
-UTF8_OBJ = src/utf8.o
-TERMINAL_OBJ = src/terminal_posix.o
-HISTORY_OBJ = src/history.o
-COMPLETION_OBJ = src/completion.o
-KEYPARSER_OBJ = src/keyparser.o
-RENDER_OBJ = src/render.o
+# Default target
+all: $(BUILD_DIR)/Makefile
+	$(CMAKE) --build $(BUILD_DIR)
 
-# All module objects (for linking)
-MODULE_OBJS = $(UTF8_OBJ) $(HISTORY_OBJ) $(COMPLETION_OBJ) $(KEYPARSER_OBJ) $(RENDER_OBJ)
+# Configure CMake
+$(BUILD_DIR)/Makefile:
+	$(CMAKE) -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE)
 
-all: linenoise-example linenoise-test
+# Build targets
+linenoise-example: $(BUILD_DIR)/Makefile
+	$(CMAKE) --build $(BUILD_DIR) --target linenoise-example
 
-# Compile UTF-8 module
-$(UTF8_OBJ): $(UTF8_SRC) internal/utf8.h
-	$(CC) $(CFLAGS) -c -o $@ $<
+linenoise-test: $(BUILD_DIR)/Makefile
+	$(CMAKE) --build $(BUILD_DIR) --target linenoise-test
 
-# Compile terminal module
-$(TERMINAL_OBJ): $(TERMINAL_SRC) internal/terminal.h
-	$(CC) $(CFLAGS) -c -o $@ $<
+# Run tests (requires both test binary and example binary)
+test: $(BUILD_DIR)/Makefile
+	$(CMAKE) --build $(BUILD_DIR) --target linenoise-example
+	$(CMAKE) --build $(BUILD_DIR) --target linenoise-test
+	cd $(BUILD_DIR) && ctest --output-on-failure
 
-# Compile history module
-$(HISTORY_OBJ): $(HISTORY_SRC) internal/history.h
-	$(CC) $(CFLAGS) -c -o $@ $<
-
-# Compile completion module
-$(COMPLETION_OBJ): $(COMPLETION_SRC) internal/completion.h
-	$(CC) $(CFLAGS) -c -o $@ $<
-
-# Compile key parser module
-$(KEYPARSER_OBJ): $(KEYPARSER_SRC) internal/keyparser.h
-	$(CC) $(CFLAGS) -c -o $@ $<
-
-# Compile render module
-$(RENDER_OBJ): $(RENDER_SRC) internal/render.h internal/utf8.h
-	$(CC) $(CFLAGS) -c -o $@ $<
-
-# Main example application
-linenoise-example: linenoise.h linenoise.c example.c $(UTF8_OBJ) internal/utf8.h
-	$(CC) $(CFLAGS) -o linenoise-example linenoise.c example.c $(UTF8_OBJ)
-
-# Test suite (uses shared UTF-8 module)
-linenoise-test: linenoise-test.c linenoise-example $(UTF8_OBJ) internal/utf8.h
-	$(CC) $(CFLAGS) -o linenoise-test linenoise-test.c $(UTF8_OBJ)
-
-# Build all modules (for verification)
-modules: $(MODULE_OBJS)
-
-test: linenoise-test linenoise-example
-	./linenoise-test
-
+# Clean build artifacts
 clean:
-	rm -f linenoise-example linenoise-test $(UTF8_OBJ) $(TERMINAL_OBJ) $(HISTORY_OBJ) $(COMPLETION_OBJ) $(KEYPARSER_OBJ) $(RENDER_OBJ)
+	rm -rf $(BUILD_DIR)
 
-.PHONY: all test clean modules
+# Rebuild from scratch
+rebuild: clean all
+
+# Debug build
+debug:
+	$(CMAKE) -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=Debug
+	$(CMAKE) --build $(BUILD_DIR)
+
+# Install (requires sudo for system directories)
+install: $(BUILD_DIR)/Makefile
+	$(CMAKE) --build $(BUILD_DIR)
+	$(CMAKE) --install $(BUILD_DIR)
+
+# Show CMake configuration
+config:
+	@echo "Build directory: $(BUILD_DIR)"
+	@echo "CMake: $(CMAKE)"
+	@echo "Build type: $(CMAKE_BUILD_TYPE)"
+	@if [ -f $(BUILD_DIR)/CMakeCache.txt ]; then \
+		echo ""; \
+		echo "Current CMake configuration:"; \
+		grep -E "^(CMAKE_BUILD_TYPE|BUILD_EXAMPLES|BUILD_TESTS|BUILD_SHARED_LIBS)" $(BUILD_DIR)/CMakeCache.txt 2>/dev/null || true; \
+	fi
+
+# Help
+help:
+	@echo "Linenoise Makefile (CMake frontend)"
+	@echo ""
+	@echo "Targets:"
+	@echo "  all              Build everything (default)"
+	@echo "  test             Build and run tests"
+	@echo "  clean            Remove build directory"
+	@echo "  rebuild          Clean and rebuild"
+	@echo "  debug            Build with debug symbols"
+	@echo "  install          Install to system"
+	@echo "  config           Show build configuration"
+	@echo "  help             Show this help"
+	@echo ""
+	@echo "Variables:"
+	@echo "  BUILD_DIR        Build directory (default: build)"
+	@echo "  CMAKE            CMake executable (default: cmake)"
+	@echo "  CMAKE_BUILD_TYPE Build type (default: Release)"
+	@echo ""
+	@echo "Examples:"
+	@echo "  make                    # Build everything"
+	@echo "  make test               # Run tests"
+	@echo "  make BUILD_DIR=debug debug"
+	@echo "  make CMAKE_BUILD_TYPE=Debug"
+
+.PHONY: all test clean rebuild debug install config help linenoise-example linenoise-test

@@ -296,7 +296,7 @@ FILE *lndebug_fp = NULL;
         fflush(lndebug_fp); \
     } while (0)
 #else
-#define lndebug(fmt, ...)
+#define lndebug(...) ((void)0)
 #endif
 
 /* ======================= Low level terminal handling ====================== */

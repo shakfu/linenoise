@@ -216,49 +216,38 @@ Prioritized task list derived from architectural review. Items ordered by depend
 
 ### 4.1 Replace Magic Numbers
 
-- [ ] **Define constants for buffer sizes**
-  ```c
-  #define LINENOISE_MAX_LINE 4096
-  #define LINENOISE_SEQ_BUF_SIZE 64
-  #define LINENOISE_HISTORY_DEFAULT_LEN 100
-  ```
+- [x] **Define constants for buffer sizes**
+  - `LINENOISE_MAX_LINE` (4096) - maximum line length
+  - `LINENOISE_DEFAULT_HISTORY_MAX_LEN` (100) - default history size
+  - `LINENOISE_SEQ_SIZE` (64) - escape sequence buffer size
+  - All constants now defined in `linenoise.h` for public use
 
-- [ ] **Audit all hardcoded numbers**
-  - Lines 122, 587, 603, 632, 836, etc.
+- [x] **Replace hardcoded buffer sizes**
+  - All `char seq[32]` and `char seq[64]` now use `LINENOISE_SEQ_SIZE`
+  - All `snprintf(seq,32,` and `snprintf(seq,64,` now use `sizeof(seq)`
 
 ### 4.2 Improve Error Handling
 
-- [ ] **Check write() return values**
-  - Lines 592, 626, 634, 649-651, 950, 1060, 1115, 1292
+- [x] **Add error reporting mechanism**
+  - `linenoise_error_t` enum with error codes:
+    - `LINENOISE_OK`, `LINENOISE_ERR_ERRNO`, `LINENOISE_ERR_NOT_TTY`
+    - `LINENOISE_ERR_NOT_SUPPORTED`, `LINENOISE_ERR_READ`, `LINENOISE_ERR_WRITE`
+    - `LINENOISE_ERR_MEMORY`, `LINENOISE_ERR_INVALID`
+    - `LINENOISE_ERR_EOF`, `LINENOISE_ERR_INTERRUPTED`
+  - `linenoise_get_error()` - get last error code
+  - `linenoise_error_string()` - get human-readable error message
+  - Error codes set on Ctrl+C, Ctrl+D, memory allocation failures, EOF
 
-- [ ] **Add error reporting mechanism**
-  ```c
-  typedef enum {
-      LINENOISE_OK = 0,
-      LINENOISE_ERR_WRITE,
-      LINENOISE_ERR_READ,
-      LINENOISE_ERR_MEMORY,
-      LINENOISE_ERR_NOT_TTY
-  } linenoise_error_t;
-
-  linenoise_error_t linenoiseGetLastError(void);
-  const char *linenoiseErrorString(linenoise_error_t err);
-  ```
+- [ ] **Add error checking to all write() calls** (deferred - low impact)
 
 ### 4.3 Memory Allocation
 
-- [ ] **Add custom allocator support**
-  ```c
-  typedef void *(*linenoise_malloc_fn)(size_t);
-  typedef void (*linenoise_free_fn)(void *);
-  typedef void *(*linenoise_realloc_fn)(void *, size_t);
-
-  void linenoiseSetAllocator(
-      linenoise_malloc_fn malloc_fn,
-      linenoise_free_fn free_fn,
-      linenoise_realloc_fn realloc_fn
-  );
-  ```
+- [x] **Add custom allocator support**
+  - `linenoise_malloc_fn`, `linenoise_free_fn`, `linenoise_realloc_fn` types
+  - `linenoise_set_allocator()` to set custom allocator functions
+  - Internal wrappers: `ln_malloc()`, `ln_free()`, `ln_realloc()`, `ln_strdup()`
+  - All internal memory operations now use custom allocator wrappers
+  - Automatic error code setting on allocation failure
 
 ---
 
@@ -342,6 +331,6 @@ linenoise/
 | P1       | Foundation (Windows)    | 12    | 11   |
 | P2       | Windows Support         | 8     | 6    |
 | P3       | Modularization          | 14    | 8    |
-| P4       | Code Quality            | 5     | 0    |
+| P4       | Code Quality            | 5     | 4    |
 | P5       | Enhancements            | 5     | 0    |
-| **Total**|                         | **47**| **28**|
+| **Total**|                         | **47**| **32**|

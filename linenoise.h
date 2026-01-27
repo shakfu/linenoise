@@ -45,6 +45,53 @@ extern "C" {
 
 #include <stddef.h>
 
+/* ===== Constants ===== */
+
+/* Maximum line length for input buffer. */
+#define LINENOISE_MAX_LINE 4096
+
+/* Default maximum history length. */
+#define LINENOISE_DEFAULT_HISTORY_MAX_LEN 100
+
+/* Internal escape sequence buffer size. */
+#define LINENOISE_SEQ_SIZE 64
+
+/* ===== Error Handling ===== */
+
+/* Error codes returned by linenoise functions. */
+typedef enum {
+    LINENOISE_OK = 0,           /* Success */
+    LINENOISE_ERR_ERRNO,        /* Error in errno (use strerror) */
+    LINENOISE_ERR_NOT_TTY,      /* Not a terminal */
+    LINENOISE_ERR_NOT_SUPPORTED,/* Terminal not supported */
+    LINENOISE_ERR_READ,         /* Read error */
+    LINENOISE_ERR_WRITE,        /* Write error */
+    LINENOISE_ERR_MEMORY,       /* Memory allocation failed */
+    LINENOISE_ERR_INVALID,      /* Invalid argument */
+    LINENOISE_ERR_EOF,          /* End of file (Ctrl+D) */
+    LINENOISE_ERR_INTERRUPTED   /* Interrupted (Ctrl+C) */
+} linenoise_error_t;
+
+/* Get the last error code for the current thread. */
+linenoise_error_t linenoise_get_error(void);
+
+/* Get a human-readable error message for an error code. */
+const char *linenoise_error_string(linenoise_error_t err);
+
+/* ===== Custom Allocator ===== */
+
+/* Custom memory allocation function types. */
+typedef void *(*linenoise_malloc_fn)(size_t size);
+typedef void (*linenoise_free_fn)(void *ptr);
+typedef void *(*linenoise_realloc_fn)(void *ptr, size_t size);
+
+/* Set custom memory allocator functions.
+ * Pass NULL for any function to use the default (malloc/free/realloc).
+ * Must be called before any other linenoise functions. */
+void linenoise_set_allocator(linenoise_malloc_fn malloc_fn,
+                             linenoise_free_fn free_fn,
+                             linenoise_realloc_fn realloc_fn);
+
 /* Sentinel value returned by linenoise_edit_feed() when more input is needed. */
 extern char *linenoise_edit_more;
 

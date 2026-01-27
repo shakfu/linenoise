@@ -73,6 +73,20 @@ and context-based state management. The legacy camelCase global API has been rem
   - Separated from I/O for testability
   - Single-line and multi-line rendering support
 
+#### Code Quality Improvements
+- Replaced magic numbers with named constants
+  - `LINENOISE_MAX_LINE` (4096) - maximum line length
+  - `LINENOISE_DEFAULT_HISTORY_MAX_LEN` (100) - default history size
+  - `LINENOISE_SEQ_SIZE` (64) - escape sequence buffer size
+- Added error reporting mechanism
+  - `linenoise_error_t` enum with comprehensive error codes
+  - `linenoise_get_error()` to retrieve last error
+  - `linenoise_error_string()` for human-readable error messages
+- Added custom memory allocator support
+  - `linenoise_set_allocator()` to set custom malloc/free/realloc functions
+  - All internal allocations use custom allocator when set
+  - Enables integration with custom memory management systems
+
 #### Windows Support
 - Added Windows 10+ support using Virtual Terminal (VT) mode
   - `SetConsoleMode()` with `ENABLE_VIRTUAL_TERMINAL_PROCESSING`

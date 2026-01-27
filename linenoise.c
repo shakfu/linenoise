@@ -192,9 +192,81 @@ static int win_read(int fd, void *buf, size_t count) {
 #define utf8StrWidth        utf8_str_width
 #define utf8SingleCharWidth utf8_single_char_width
 
-#define LINENOISE_DEFAULT_HISTORY_MAX_LEN 100
-#define LINENOISE_MAX_LINE 4096
+/* List of terminals known to not support escape sequences. */
 static char *unsupported_term[] = {"dumb","cons25","emacs",NULL};
+
+/* ======================= Error Handling ==================================== */
+
+/* Thread-local error code (using static for single-threaded simplicity).
+ * For true thread-safety, this should use thread-local storage. */
+static linenoise_error_t last_error = LINENOISE_OK;
+
+static void set_error(linenoise_error_t err) {
+    last_error = err;
+}
+
+linenoise_error_t linenoise_get_error(void) {
+    return last_error;
+}
+
+const char *linenoise_error_string(linenoise_error_t err) {
+    switch (err) {
+        case LINENOISE_OK:              return "Success";
+        case LINENOISE_ERR_ERRNO:       return "System error (check errno)";
+        case LINENOISE_ERR_NOT_TTY:     return "Not a terminal";
+        case LINENOISE_ERR_NOT_SUPPORTED: return "Terminal not supported";
+        case LINENOISE_ERR_READ:        return "Read error";
+        case LINENOISE_ERR_WRITE:       return "Write error";
+        case LINENOISE_ERR_MEMORY:      return "Memory allocation failed";
+        case LINENOISE_ERR_INVALID:     return "Invalid argument";
+        case LINENOISE_ERR_EOF:         return "End of file";
+        case LINENOISE_ERR_INTERRUPTED: return "Interrupted";
+        default:                        return "Unknown error";
+    }
+}
+
+/* ======================= Custom Allocator ================================== */
+
+/* Custom allocator function pointers. NULL means use standard functions. */
+static linenoise_malloc_fn custom_malloc = NULL;
+static linenoise_free_fn custom_free = NULL;
+static linenoise_realloc_fn custom_realloc = NULL;
+
+void linenoise_set_allocator(linenoise_malloc_fn malloc_fn,
+                             linenoise_free_fn free_fn,
+                             linenoise_realloc_fn realloc_fn) {
+    custom_malloc = malloc_fn;
+    custom_free = free_fn;
+    custom_realloc = realloc_fn;
+}
+
+/* Internal allocation wrappers. */
+static void *ln_malloc(size_t size) {
+    void *ptr = custom_malloc ? custom_malloc(size) : malloc(size);
+    if (ptr == NULL) set_error(LINENOISE_ERR_MEMORY);
+    return ptr;
+}
+
+static void ln_free(void *ptr) {
+    if (custom_free) {
+        custom_free(ptr);
+    } else {
+        free(ptr);
+    }
+}
+
+static void *ln_realloc(void *ptr, size_t size) {
+    void *new_ptr = custom_realloc ? custom_realloc(ptr, size) : realloc(ptr, size);
+    if (new_ptr == NULL && size > 0) set_error(LINENOISE_ERR_MEMORY);
+    return new_ptr;
+}
+
+static char *ln_strdup(const char *s) {
+    size_t len = strlen(s) + 1;
+    char *copy = ln_malloc(len);
+    if (copy) memcpy(copy, s, len);
+    return copy;
+}
 
 /* Forward declarations. */
 static char *linenoise_no_tty(void);
@@ -587,8 +659,8 @@ static int get_columns(int ifd, int ofd) {
 
         /* Restore position. */
         if (cols > start) {
-            char seq[32];
-            snprintf(seq,32,"\x1b[%dD",cols-start);
+            char seq[LINENOISE_SEQ_SIZE];
+            snprintf(seq,sizeof(seq),"\x1b[%dD",cols-start);
             if (write(ofd,seq,strlen(seq)) == -1) {
                 /* Can't recover... */
             }
@@ -624,9 +696,9 @@ static void linenoise_beep(void) {
 static void free_completions(linenoise_completions_t *lc) {
     size_t i;
     for (i = 0; i < lc->len; i++)
-        free(lc->cvec[i]);
+        ln_free(lc->cvec[i]);
     if (lc->cvec != NULL)
-        free(lc->cvec);
+        ln_free(lc->cvec);
 }
 
 /* Called by complete_line() and linenoise_show() to render the current
@@ -732,12 +804,12 @@ void linenoise_add_completion(linenoise_completions_t *lc, const char *str) {
     size_t len = strlen(str);
     char *copy, **cvec;
 
-    copy = malloc(len+1);
+    copy = ln_malloc(len+1);
     if (copy == NULL) return;
     memcpy(copy,str,len+1);
-    cvec = realloc(lc->cvec,sizeof(char*)*(lc->len+1));
+    cvec = ln_realloc(lc->cvec,sizeof(char*)*(lc->len+1));
     if (cvec == NULL) {
-        free(copy);
+        ln_free(copy);
         return;
     }
     lc->cvec = cvec;
@@ -761,7 +833,7 @@ static void ab_init(struct abuf *ab) {
 }
 
 static void ab_append(struct abuf *ab, const char *s, int len) {
-    char *new = realloc(ab->b,ab->len+len);
+    char *new = ln_realloc(ab->b,ab->len+len);
 
     if (new == NULL) return;
     memcpy(new+ab->len,s,len);
@@ -770,13 +842,13 @@ static void ab_append(struct abuf *ab, const char *s, int len) {
 }
 
 static void ab_free(struct abuf *ab) {
-    free(ab->b);
+    ln_free(ab->b);
 }
 
 /* Helper of refresh_single_line() and refresh_multi_line() to show hints
  * to the right of the prompt. Now uses display widths for proper UTF-8. */
 void refresh_show_hints(struct abuf *ab, linenoise_state_t *l, int pwidth) {
-    char seq[64];
+    char seq[LINENOISE_SEQ_SIZE];
     size_t bufwidth = utf8StrWidth(l->buf, l->len);
     if (hints_callback && pwidth + bufwidth < l->cols) {
         int color = -1, bold = 0;
@@ -799,7 +871,7 @@ void refresh_show_hints(struct abuf *ab, linenoise_state_t *l, int pwidth) {
             }
             if (bold == 1 && color == -1) color = 37;
             if (color != -1 || bold != 0)
-                snprintf(seq,64,"\033[%d;%d;49m",bold,color);
+                snprintf(seq,sizeof(seq),"\033[%d;%d;49m",bold,color);
             else
                 seq[0] = '\0';
             ab_append(ab,seq,strlen(seq));
@@ -823,7 +895,7 @@ void refresh_show_hints(struct abuf *ab, linenoise_state_t *l, int pwidth) {
  * This function is UTF-8 aware and uses display widths (not byte counts)
  * for cursor positioning and horizontal scrolling. */
 static void refresh_single_line(linenoise_state_t *l, int flags) {
-    char seq[64];
+    char seq[LINENOISE_SEQ_SIZE];
     size_t pwidth = utf8StrWidth(l->prompt, l->plen); /* Prompt display width */
     int fd = l->ofd;
     char *buf = l->buf;
@@ -904,7 +976,7 @@ static void refresh_single_line(linenoise_state_t *l, int flags) {
  *
  * This function is UTF-8 aware and uses display widths for positioning. */
 static void refresh_multi_line(linenoise_state_t *l, int flags) {
-    char seq[64];
+    char seq[LINENOISE_SEQ_SIZE];
     size_t pwidth = utf8StrWidth(l->prompt, l->plen);  /* Prompt display width */
     size_t bufwidth = utf8StrWidth(l->buf, l->len);    /* Buffer display width */
     size_t poswidth = utf8StrWidth(l->buf, l->pos);    /* Cursor display width */
@@ -925,14 +997,14 @@ static void refresh_multi_line(linenoise_state_t *l, int flags) {
     if (flags & REFRESH_CLEAN) {
         if (old_rows-rpos > 0) {
             lndebug("go down %d", old_rows-rpos);
-            snprintf(seq,64,"\x1b[%dB", old_rows-rpos);
+            snprintf(seq,sizeof(seq),"\x1b[%dB", old_rows-rpos);
             ab_append(&ab,seq,strlen(seq));
         }
 
         /* Now for every row clear it, go up. */
         for (j = 0; j < old_rows-1; j++) {
             lndebug("clear+up");
-            snprintf(seq,64,"\r\x1b[0K\x1b[1A");
+            snprintf(seq,sizeof(seq),"\r\x1b[0K\x1b[1A");
             ab_append(&ab,seq,strlen(seq));
         }
     }
@@ -940,7 +1012,7 @@ static void refresh_multi_line(linenoise_state_t *l, int flags) {
     if (flags & REFRESH_ALL) {
         /* Clean the top line. */
         lndebug("clear");
-        snprintf(seq,64,"\r\x1b[0K");
+        snprintf(seq,sizeof(seq),"\r\x1b[0K");
         ab_append(&ab,seq,strlen(seq));
     }
 
@@ -969,7 +1041,7 @@ static void refresh_multi_line(linenoise_state_t *l, int flags) {
         {
             lndebug("<newline>");
             ab_append(&ab,"\n",1);
-            snprintf(seq,64,"\r");
+            snprintf(seq,sizeof(seq),"\r");
             ab_append(&ab,seq,strlen(seq));
             rows++;
             if (rows > (int)l->oldrows) l->oldrows = rows;
@@ -982,7 +1054,7 @@ static void refresh_multi_line(linenoise_state_t *l, int flags) {
         /* Go up till we reach the expected position. */
         if (rows-rpos2 > 0) {
             lndebug("go-up %d", rows-rpos2);
-            snprintf(seq,64,"\x1b[%dA", rows-rpos2);
+            snprintf(seq,sizeof(seq),"\x1b[%dA", rows-rpos2);
             ab_append(&ab,seq,strlen(seq));
         }
 
@@ -990,9 +1062,9 @@ static void refresh_multi_line(linenoise_state_t *l, int flags) {
         col = (pwidth+poswidth) % l->cols;
         lndebug("set col %d", 1+col);
         if (col)
-            snprintf(seq,64,"\r\x1b[%dC", col);
+            snprintf(seq,sizeof(seq),"\r\x1b[%dC", col);
         else
-            snprintf(seq,64,"\r");
+            snprintf(seq,sizeof(seq),"\r");
         ab_append(&ab,seq,strlen(seq));
     }
 
@@ -1113,8 +1185,8 @@ void linenoise_edit_history_next(linenoise_state_t *l, int dir) {
     if (history_len > 1) {
         /* Update the current history entry before to
          * overwrite it with the next one. */
-        free(history[history_len - 1 - l->history_index]);
-        history[history_len - 1 - l->history_index] = strdup(l->buf);
+        ln_free(history[history_len - 1 - l->history_index]);
+        history[history_len - 1 - l->history_index] = ln_strdup(l->buf);
         /* Show the new entry */
         l->history_index += (dir == LINENOISE_HISTORY_PREV) ? 1 : -1;
         if (l->history_index < 0) {
@@ -1312,7 +1384,7 @@ char *linenoise_edit_feed(linenoise_state_t *l) {
     switch(c) {
     case ENTER:    /* enter */
         history_len--;
-        free(history[history_len]);
+        ln_free(history[history_len]);
         if (mlmode) linenoise_edit_move_end(l);
         if (hints_callback) {
             /* Force a refresh without hints to leave the previous
@@ -1322,9 +1394,10 @@ char *linenoise_edit_feed(linenoise_state_t *l) {
             refresh_line(l);
             hints_callback = hc;
         }
-        return strdup(l->buf);
+        return ln_strdup(l->buf);
     case CTRL_C:     /* ctrl-c */
         errno = EAGAIN;
+        set_error(LINENOISE_ERR_INTERRUPTED);
         return NULL;
     case BACKSPACE:   /* backspace */
     case 8:     /* ctrl-h */
@@ -1336,8 +1409,9 @@ char *linenoise_edit_feed(linenoise_state_t *l) {
             linenoise_edit_delete(l);
         } else {
             history_len--;
-            free(history[history_len]);
+            ln_free(history[history_len]);
             errno = ENOENT;
+            set_error(LINENOISE_ERR_EOF);
             return NULL;
         }
         break;
@@ -1566,16 +1640,17 @@ static char *linenoise_no_tty(void) {
             if (maxlen == 0) maxlen = 16;
             maxlen *= 2;
             char *oldval = line;
-            line = realloc(line,maxlen);
+            line = ln_realloc(line,maxlen);
             if (line == NULL) {
-                if (oldval) free(oldval);
+                if (oldval) ln_free(oldval);
                 return NULL;
             }
         }
         int c = fgetc(stdin);
         if (c == EOF || c == '\n') {
             if (c == EOF && len == 0) {
-                free(line);
+                ln_free(line);
+                set_error(LINENOISE_ERR_EOF);
                 return NULL;
             } else {
                 line[len] = '\0';
@@ -1605,13 +1680,16 @@ static char *read_line(const char *prompt) {
 
         printf("%s",prompt);
         fflush(stdout);
-        if (fgets(buf,LINENOISE_MAX_LINE,stdin) == NULL) return NULL;
+        if (fgets(buf,LINENOISE_MAX_LINE,stdin) == NULL) {
+            set_error(LINENOISE_ERR_EOF);
+            return NULL;
+        }
         len = strlen(buf);
         while(len && (buf[len-1] == '\n' || buf[len-1] == '\r')) {
             len--;
             buf[len] = '\0';
         }
-        return strdup(buf);
+        return ln_strdup(buf);
     } else {
         char *retval = blocking_edit(STDIN_FILENO,STDOUT_FILENO,buf,LINENOISE_MAX_LINE,prompt);
         return retval;
@@ -1624,7 +1702,7 @@ static char *read_line(const char *prompt) {
  * allocator. */
 void linenoise_free(void *ptr) {
     if (ptr == linenoise_edit_more) return; /* Protect from API misuse. */
-    free(ptr);
+    ln_free(ptr);
 }
 
 /* ================================ History ================================= */
@@ -1636,8 +1714,8 @@ static void free_history(void) {
         int j;
 
         for (j = 0; j < history_len; j++)
-            free(history[j]);
-        free(history);
+            ln_free(history[j]);
+        ln_free(history);
     }
 }
 
@@ -1661,7 +1739,7 @@ static int history_add(const char *line) {
 
     /* Initialization on first call. */
     if (history == NULL) {
-        history = malloc(sizeof(char*)*history_max_len);
+        history = ln_malloc(sizeof(char*)*history_max_len);
         if (history == NULL) return 0;
         memset(history,0,(sizeof(char*)*history_max_len));
     }
@@ -1671,10 +1749,10 @@ static int history_add(const char *line) {
 
     /* Add an heap allocated copy of the line in the history.
      * If we reached the max length, remove the older line. */
-    linecopy = strdup(line);
+    linecopy = ln_strdup(line);
     if (!linecopy) return 0;
     if (history_len == history_max_len) {
-        free(history[0]);
+        ln_free(history[0]);
         memmove(history,history+1,sizeof(char*)*(history_max_len-1));
         history_len--;
     }
@@ -1687,7 +1765,7 @@ static int history_add(const char *line) {
 
 /* Create a new linenoise context with default settings. */
 linenoise_context_t *linenoise_context_create(void) {
-    linenoise_context_t *ctx = malloc(sizeof(linenoise_context_t));
+    linenoise_context_t *ctx = ln_malloc(sizeof(linenoise_context_t));
     if (!ctx) return NULL;
 
     memset(&ctx->orig_termios, 0, sizeof(ctx->orig_termios));
@@ -1712,12 +1790,12 @@ void linenoise_context_destroy(linenoise_context_t *ctx) {
     /* Free history. */
     if (ctx->history) {
         for (int j = 0; j < ctx->history_len; j++) {
-            free(ctx->history[j]);
+            ln_free(ctx->history[j]);
         }
-        free(ctx->history);
+        ln_free(ctx->history);
     }
 
-    free(ctx);
+    ln_free(ctx);
 }
 
 /* Set multi-line mode for a context. */
@@ -1756,20 +1834,20 @@ int linenoise_history_add(linenoise_context_t *ctx, const char *line) {
     if (ctx->history_len && !strcmp(ctx->history[ctx->history_len-1], line))
         return 0;
 
-    linecopy = strdup(line);
+    linecopy = ln_strdup(line);
     if (!linecopy) return 0;
 
     if (ctx->history == NULL) {
-        ctx->history = malloc(sizeof(char*) * ctx->history_max_len);
+        ctx->history = ln_malloc(sizeof(char*) * ctx->history_max_len);
         if (ctx->history == NULL) {
-            free(linecopy);
+            ln_free(linecopy);
             return 0;
         }
         memset(ctx->history, 0, sizeof(char*) * ctx->history_max_len);
     }
 
     if (ctx->history_len == ctx->history_max_len) {
-        free(ctx->history[0]);
+        ln_free(ctx->history[0]);
         memmove(ctx->history, ctx->history + 1, sizeof(char*) * (ctx->history_max_len - 1));
         ctx->history_len--;
     }
@@ -1787,19 +1865,19 @@ int linenoise_history_set_max_len(linenoise_context_t *ctx, int len) {
 
     if (ctx->history) {
         int tocopy = ctx->history_len;
-        new_history = malloc(sizeof(char*) * len);
+        new_history = ln_malloc(sizeof(char*) * len);
         if (new_history == NULL) return 0;
 
         if (len < tocopy) {
             int j;
             for (j = 0; j < tocopy - len; j++)
-                free(ctx->history[j]);
+                ln_free(ctx->history[j]);
             tocopy = len;
         }
         memset(new_history, 0, sizeof(char*) * len);
         memcpy(new_history, ctx->history + (ctx->history_len - tocopy),
                sizeof(char*) * tocopy);
-        free(ctx->history);
+        ln_free(ctx->history);
         ctx->history = new_history;
     }
     ctx->history_max_len = len;

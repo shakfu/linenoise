@@ -156,6 +156,17 @@ void linenoise_edit_stop(linenoise_state_t *state);
 void linenoise_hide(linenoise_state_t *state);
 void linenoise_show(linenoise_state_t *state);
 
+/* ===== Word Movement ===== */
+
+void linenoise_edit_move_word_left(linenoise_state_t *state);
+void linenoise_edit_move_word_right(linenoise_state_t *state);
+void linenoise_edit_delete_word_right(linenoise_state_t *state);
+
+/* ===== Undo/Redo ===== */
+
+void linenoise_edit_undo(linenoise_state_t *state);
+void linenoise_edit_redo(linenoise_state_t *state);
+
 /* ===== History ===== */
 
 int linenoise_history_add(linenoise_context_t *ctx, const char *line);

@@ -256,9 +256,11 @@ Prioritized task list derived from architectural review. Items ordered by depend
 ### 5.1 Extended Key Support
 
 - [ ] **F-keys (F1-F12)**
-- [ ] **Page Up / Page Down**
-- [ ] **Ctrl+Arrow for word movement**
-- [ ] **Alt+Backspace for word delete**
+- [x] **Page Up / Page Down** (mapped to history navigation)
+- [x] **Ctrl+Arrow for word movement**
+- [x] **Alt+Backspace for word delete**
+- [x] **Alt+b/f for word movement (Emacs-style)**
+- [x] **Alt+d for delete word right**
 
 ### 5.2 Mouse Support
 
@@ -285,8 +287,8 @@ Prioritized task list derived from architectural review. Items ordered by depend
 
 ### 5.5 Undo/Redo
 
-- [ ] **Maintain edit history stack**
-- [ ] **Ctrl+Z for undo, Ctrl+Y for redo**
+- [x] **Maintain edit history stack**
+- [x] **Ctrl+Z for undo, Ctrl+Y for redo**
 
 ---
 
@@ -332,5 +334,5 @@ linenoise/
 | P2       | Windows Support         | 8     | 6    |
 | P3       | Modularization          | 14    | 8    |
 | P4       | Code Quality            | 5     | 4    |
-| P5       | Enhancements            | 5     | 0    |
-| **Total**|                         | **47**| **32**|
+| P5       | Enhancements            | 13    | 7    |
+| **Total**|                         | **55**| **39**|

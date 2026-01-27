@@ -87,6 +87,19 @@ and context-based state management. The legacy camelCase global API has been rem
   - All internal allocations use custom allocator when set
   - Enables integration with custom memory management systems
 
+#### Enhanced Editing
+- Word movement and deletion
+  - `linenoise_edit_move_word_left()` - Move cursor to previous word (Ctrl+Left, Alt+b)
+  - `linenoise_edit_move_word_right()` - Move cursor to next word (Ctrl+Right, Alt+f)
+  - `linenoise_edit_delete_word_right()` - Delete word to the right (Alt+d)
+  - Alt+Backspace to delete previous word
+- Undo/Redo support
+  - `linenoise_edit_undo()` - Undo last edit (Ctrl+Z)
+  - `linenoise_edit_redo()` - Redo last undone edit (Ctrl+Y)
+  - Automatic state saving before destructive operations
+  - Up to 100 undo levels
+- Page Up/Down mapped to history navigation
+
 #### Windows Support
 - Added Windows 10+ support using Virtual Terminal (VT) mode
   - `SetConsoleMode()` with `ENABLE_VIRTUAL_TERMINAL_PROCESSING`

@@ -342,6 +342,8 @@ enum KEY_ACTION{
 	CTRL_T = 20,        /* Ctrl-t */
 	CTRL_U = 21,        /* Ctrl+u */
 	CTRL_W = 23,        /* Ctrl+w */
+	CTRL_Y = 25,        /* Ctrl+y (redo) */
+	CTRL_Z = 26,        /* Ctrl+z (undo) */
 	ESC = 27,           /* Escape */
 	BACKSPACE =  127    /* Backspace */
 };
@@ -1246,6 +1248,166 @@ void linenoise_edit_delete_prev_word(linenoise_state_t *l) {
     refresh_line(l);
 }
 
+/* Move cursor to the start of the previous word. */
+void linenoise_edit_move_word_left(linenoise_state_t *l) {
+    if (l->pos == 0) return;
+    /* Skip spaces before the word. */
+    while (l->pos > 0 && l->buf[l->pos-1] == ' ')
+        l->pos -= utf8PrevCharLen(l->buf, l->pos);
+    /* Skip non-space characters. */
+    while (l->pos > 0 && l->buf[l->pos-1] != ' ')
+        l->pos -= utf8PrevCharLen(l->buf, l->pos);
+    refresh_line(l);
+}
+
+/* Move cursor to the end of the next word. */
+void linenoise_edit_move_word_right(linenoise_state_t *l) {
+    if (l->pos >= l->len) return;
+    /* Skip current word characters. */
+    while (l->pos < l->len && l->buf[l->pos] != ' ')
+        l->pos += utf8NextCharLen(l->buf, l->pos, l->len);
+    /* Skip spaces after the word. */
+    while (l->pos < l->len && l->buf[l->pos] == ' ')
+        l->pos += utf8NextCharLen(l->buf, l->pos, l->len);
+    refresh_line(l);
+}
+
+/* Delete the word to the right of the cursor. */
+void linenoise_edit_delete_word_right(linenoise_state_t *l) {
+    size_t old_pos = l->pos;
+    size_t diff;
+
+    if (l->pos >= l->len) return;
+    /* Skip current word characters. */
+    while (l->pos < l->len && l->buf[l->pos] != ' ')
+        l->pos += utf8NextCharLen(l->buf, l->pos, l->len);
+    /* Skip spaces after the word. */
+    while (l->pos < l->len && l->buf[l->pos] == ' ')
+        l->pos += utf8NextCharLen(l->buf, l->pos, l->len);
+    diff = l->pos - old_pos;
+    memmove(l->buf+old_pos, l->buf+l->pos, l->len-l->pos+1);
+    l->len -= diff;
+    l->pos = old_pos;
+    refresh_line(l);
+}
+
+/* ======================= Undo/Redo Support ================================= */
+
+#define LINENOISE_UNDO_MAX 100  /* Maximum undo stack size */
+
+/* Undo entry structure. */
+typedef struct undo_entry {
+    char *buf;          /* Buffer content snapshot */
+    size_t len;         /* Buffer length */
+    size_t pos;         /* Cursor position */
+} undo_entry_t;
+
+/* Undo state - stored per editing state (simplified: using static for now). */
+static undo_entry_t *undo_stack = NULL;
+static int undo_stack_len = 0;
+static int undo_stack_idx = 0;  /* Current position in stack */
+static int undo_stack_cap = 0;
+
+/* Save current state to undo stack. */
+static void undo_save(linenoise_state_t *l) {
+    undo_entry_t *entry;
+
+    /* Initialize stack if needed. */
+    if (undo_stack == NULL) {
+        undo_stack_cap = LINENOISE_UNDO_MAX;
+        undo_stack = ln_malloc(sizeof(undo_entry_t) * undo_stack_cap);
+        if (undo_stack == NULL) return;
+        memset(undo_stack, 0, sizeof(undo_entry_t) * undo_stack_cap);
+    }
+
+    /* Discard any redo entries after current position. */
+    while (undo_stack_len > undo_stack_idx) {
+        undo_stack_len--;
+        ln_free(undo_stack[undo_stack_len].buf);
+        undo_stack[undo_stack_len].buf = NULL;
+    }
+
+    /* If stack is full, remove oldest entry. */
+    if (undo_stack_len >= undo_stack_cap) {
+        ln_free(undo_stack[0].buf);
+        memmove(undo_stack, undo_stack + 1, sizeof(undo_entry_t) * (undo_stack_cap - 1));
+        undo_stack_len--;
+        undo_stack_idx--;
+    }
+
+    /* Save current state. */
+    entry = &undo_stack[undo_stack_len];
+    entry->buf = ln_malloc(l->len + 1);
+    if (entry->buf == NULL) return;
+    memcpy(entry->buf, l->buf, l->len + 1);
+    entry->len = l->len;
+    entry->pos = l->pos;
+    undo_stack_len++;
+    undo_stack_idx = undo_stack_len;
+}
+
+/* Undo: restore previous state. */
+void linenoise_edit_undo(linenoise_state_t *l) {
+    undo_entry_t *entry;
+
+    if (undo_stack == NULL || undo_stack_idx <= 0) {
+        linenoise_beep();
+        return;
+    }
+
+    /* Save current state for redo if we're at the top. */
+    if (undo_stack_idx == undo_stack_len) {
+        undo_save(l);
+        undo_stack_idx--;  /* Move back one more since undo_save incremented */
+    }
+
+    undo_stack_idx--;
+    entry = &undo_stack[undo_stack_idx];
+
+    /* Restore state. */
+    if (entry->len <= l->buflen) {
+        memcpy(l->buf, entry->buf, entry->len + 1);
+        l->len = entry->len;
+        l->pos = entry->pos;
+        refresh_line(l);
+    }
+}
+
+/* Redo: restore next state. */
+void linenoise_edit_redo(linenoise_state_t *l) {
+    undo_entry_t *entry;
+
+    if (undo_stack == NULL || undo_stack_idx >= undo_stack_len - 1) {
+        linenoise_beep();
+        return;
+    }
+
+    undo_stack_idx++;
+    entry = &undo_stack[undo_stack_idx];
+
+    /* Restore state. */
+    if (entry->len <= l->buflen) {
+        memcpy(l->buf, entry->buf, entry->len + 1);
+        l->len = entry->len;
+        l->pos = entry->pos;
+        refresh_line(l);
+    }
+}
+
+/* Clear undo stack (call when starting new edit session). */
+static void undo_clear(void) {
+    if (undo_stack != NULL) {
+        for (int i = 0; i < undo_stack_len; i++) {
+            ln_free(undo_stack[i].buf);
+        }
+        ln_free(undo_stack);
+        undo_stack = NULL;
+    }
+    undo_stack_len = 0;
+    undo_stack_idx = 0;
+    undo_stack_cap = 0;
+}
+
 /* Saved state for non-blocking API context swapping. */
 static struct {
     int active;
@@ -1262,6 +1424,9 @@ static struct {
 
 /* Internal: Start editing (operates on global state). */
 static int edit_start(linenoise_state_t *l, int stdin_fd, int stdout_fd, char *buf, size_t buflen, const char *prompt) {
+    /* Clear undo stack for new edit session. */
+    undo_clear();
+
     /* Populate the linenoise state that we pass to functions implementing
      * specific editing functionalities. */
     l->in_completion = 0;
@@ -1361,7 +1526,7 @@ char *linenoise_edit_feed(linenoise_state_t *l) {
 
     char c;
     int nread;
-    char seq[3];
+    char seq[8];  /* Enough for extended sequences like ESC [ 1 ; 5 C */
 
     nread = read(l->ifd,&c,1);
     if (nread < 0) {
@@ -1401,11 +1566,13 @@ char *linenoise_edit_feed(linenoise_state_t *l) {
         return NULL;
     case BACKSPACE:   /* backspace */
     case 8:     /* ctrl-h */
+        undo_save(l);
         linenoise_edit_backspace(l);
         break;
     case CTRL_D:     /* ctrl-d, remove char at right of cursor, or if the
                         line is empty, act as end-of-file. */
         if (l->len > 0) {
+            undo_save(l);
             linenoise_edit_delete(l);
         } else {
             history_len--;
@@ -1422,6 +1589,7 @@ char *linenoise_edit_feed(linenoise_state_t *l) {
             size_t prevlen = utf8PrevCharLen(l->buf, l->pos);
             size_t currlen = utf8NextCharLen(l->buf, l->pos, l->len);
             size_t prevstart = l->pos - prevlen;
+            undo_save(l);
             /* Copy current char to tmp, move previous char right, paste tmp. */
             memcpy(tmp, l->buf + l->pos, currlen);
             memmove(l->buf + prevstart + currlen, l->buf + prevstart, prevlen);
@@ -1457,8 +1625,31 @@ char *linenoise_edit_feed(linenoise_state_t *l) {
                 if (seq[2] == '~') {
                     switch(seq[1]) {
                     case '3': /* Delete key. */
+                        undo_save(l);
                         linenoise_edit_delete(l);
                         break;
+                    case '5': /* Page Up - treat as history prev for now */
+                        linenoise_edit_history_next(l, LINENOISE_HISTORY_PREV);
+                        break;
+                    case '6': /* Page Down - treat as history next for now */
+                        linenoise_edit_history_next(l, LINENOISE_HISTORY_NEXT);
+                        break;
+                    }
+                } else if (seq[2] == ';') {
+                    /* Modified key sequence: ESC [ 1 ; <mod> <key> */
+                    if (read_byte_with_timeout(l->ifd,seq+3,100) != 1) break;
+                    if (read_byte_with_timeout(l->ifd,seq+4,100) != 1) break;
+                    int modifier = seq[3] - '0';
+                    /* modifier: 2=Shift, 3=Alt, 5=Ctrl, 7=Ctrl+Alt */
+                    if (modifier == 5 || modifier == 3) {  /* Ctrl or Alt */
+                        switch(seq[4]) {
+                        case 'C': /* Ctrl/Alt+Right - word right */
+                            linenoise_edit_move_word_right(l);
+                            break;
+                        case 'D': /* Ctrl/Alt+Left - word left */
+                            linenoise_edit_move_word_left(l);
+                            break;
+                        }
                     }
                 }
             } else {
@@ -1496,6 +1687,26 @@ char *linenoise_edit_feed(linenoise_state_t *l) {
                 break;
             }
         }
+
+        /* Alt+letter sequences (ESC followed by letter). */
+        else if (seq[0] == 'b' || seq[0] == 'B') {
+            /* Alt+b: move word left */
+            linenoise_edit_move_word_left(l);
+        }
+        else if (seq[0] == 'f' || seq[0] == 'F') {
+            /* Alt+f: move word right */
+            linenoise_edit_move_word_right(l);
+        }
+        else if (seq[0] == 'd' || seq[0] == 'D') {
+            /* Alt+d: delete word right */
+            undo_save(l);
+            linenoise_edit_delete_word_right(l);
+        }
+        else if (seq[0] == BACKSPACE || seq[0] == CTRL_H) {
+            /* Alt+Backspace: delete previous word */
+            undo_save(l);
+            linenoise_edit_delete_prev_word(l);
+        }
         break;
     default:
         /* Handle UTF-8 multi-byte sequences. When we receive the first byte
@@ -1516,11 +1727,13 @@ char *linenoise_edit_feed(linenoise_state_t *l) {
         }
         break;
     case CTRL_U: /* Ctrl+u, delete the whole line. */
+        undo_save(l);
         l->buf[0] = '\0';
         l->pos = l->len = 0;
         refresh_line(l);
         break;
     case CTRL_K: /* Ctrl+k, delete from current to end of line. */
+        undo_save(l);
         l->buf[l->pos] = '\0';
         l->len = l->pos;
         refresh_line(l);
@@ -1536,7 +1749,14 @@ char *linenoise_edit_feed(linenoise_state_t *l) {
         refresh_line(l);
         break;
     case CTRL_W: /* ctrl+w, delete previous word */
+        undo_save(l);
         linenoise_edit_delete_prev_word(l);
+        break;
+    case CTRL_Y: /* Ctrl+y, redo */
+        linenoise_edit_redo(l);
+        break;
+    case CTRL_Z: /* Ctrl+z, undo */
+        linenoise_edit_undo(l);
         break;
     }
     return linenoise_edit_more;

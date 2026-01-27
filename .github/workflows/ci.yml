@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        compiler: [gcc, clang]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Build with Make
+      run: |
+        if [ "${{ matrix.compiler }}" = "clang" ]; then
+          export CC=clang
+        fi
+        make clean
+        make
+
+    - name: Run tests (Make)
+      run: make test
+
+    - name: Build with CMake
+      run: |
+        mkdir build && cd build
+        if [ "${{ matrix.compiler }}" = "clang" ]; then
+          cmake -DCMAKE_C_COMPILER=clang ..
+        else
+          cmake ..
+        fi
+        cmake --build .
+
+    - name: Run tests (CMake)
+      run: |
+        cd build
+        ctest --output-on-failure
+
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Build with Make
+      run: |
+        make clean
+        make
+
+    - name: Run tests (Make)
+      run: make test
+
+    - name: Build with CMake
+      run: |
+        mkdir build && cd build
+        cmake ..
+        cmake --build .
+
+    - name: Run tests (CMake)
+      run: |
+        cd build
+        ctest --output-on-failure
+
+  build-windows:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        arch: [x64, x86]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup MSVC
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: ${{ matrix.arch }}
+
+    - name: Build with CMake
+      run: |
+        mkdir build
+        cd build
+        cmake -G "NMake Makefiles" ..
+        cmake --build .
+
+    - name: Run example (smoke test)
+      run: |
+        cd build
+        echo "hello" | .\linenoise-example.exe
+      shell: cmd
+
+  build-windows-mingw:
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup MinGW
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: MINGW64
+        update: true
+        install: mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake make
+
+    - name: Build with CMake (MinGW)
+      shell: msys2 {0}
+      run: |
+        mkdir build && cd build
+        cmake -G "Unix Makefiles" ..
+        cmake --build .
+
+    - name: Run example (smoke test)
+      shell: msys2 {0}
+      run: |
+        cd build
+        echo "hello" | ./linenoise-example.exe

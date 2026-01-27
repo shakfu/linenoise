@@ -59,6 +59,30 @@ and context-based state management. The legacy camelCase global API has been rem
   - Prepares codebase for Windows support
   - Clean separation of terminal I/O from editing logic
 
+#### Windows Support
+- Added Windows 10+ support using Virtual Terminal (VT) mode
+  - `SetConsoleMode()` with `ENABLE_VIRTUAL_TERMINAL_PROCESSING`
+  - `SetConsoleMode()` with `ENABLE_VIRTUAL_TERMINAL_INPUT`
+  - Existing ANSI escape sequences work unchanged on Windows 10+
+- Created `src/terminal_windows.c` implementing terminal abstraction for Windows
+- Added Windows compatibility in `linenoise.c`:
+  - Platform-specific includes and macros
+  - Windows read/write wrapper functions
+  - Conditional compilation for POSIX vs Windows code
+- Legacy console support for pre-Windows 10 (basic functionality)
+- Runtime VT mode detection with automatic fallback
+
+#### Build System
+- Added CMakeLists.txt for cross-platform building
+  - Automatic platform detection
+  - Builds static library, example application, and tests
+  - Optional shared library build (`-DBUILD_SHARED_LIBS=ON`)
+  - CMake package config for `find_package(linenoise)` support
+- Added GitHub Actions CI workflow (`.github/workflows/ci.yml`)
+  - Linux builds with GCC and Clang
+  - macOS builds
+  - Windows builds with MSVC and MinGW
+
 ### Fixed
 
 #### Critical Bug Fixes (P0)

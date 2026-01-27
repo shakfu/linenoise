@@ -103,23 +103,78 @@
  *
  */
 
-#include <termios.h>
-#include <unistd.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <errno.h>
 #include <string.h>
-#include <stdlib.h>
 #include <ctype.h>
+#include <stdint.h>
+
+#ifdef _WIN32
+/* Windows-specific includes. */
+#include <windows.h>
+#include <io.h>
+#include <fcntl.h>
+#define isatty _isatty
+#define strcasecmp _stricmp
+#define snprintf _snprintf
+/* Windows doesn't have these, stub them out. */
+#define STDIN_FILENO 0
+#define STDOUT_FILENO 1
+#else
+/* POSIX-specific includes. */
+#include <termios.h>
+#include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
 #include <fcntl.h>
-#include <unistd.h>
-#include <stdint.h>
+#endif
+
 #include "linenoise.h"
 #include "internal/utf8.h"
+
+#ifdef _WIN32
+/* Windows I/O wrappers using console handles. */
+static HANDLE win_get_output_handle(int fd) {
+    (void)fd;
+    return GetStdHandle(STD_OUTPUT_HANDLE);
+}
+
+static int win_write(int fd, const void *buf, size_t count) {
+    HANDLE h = win_get_output_handle(fd);
+    DWORD written;
+    if (!WriteConsoleA(h, buf, (DWORD)count, &written, NULL)) {
+        /* Fallback to WriteFile for redirected output. */
+        if (!WriteFile(h, buf, (DWORD)count, &written, NULL)) {
+            return -1;
+        }
+    }
+    return (int)written;
+}
+
+static int win_read(int fd, void *buf, size_t count) {
+    HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode, read_count;
+    (void)fd;
+
+    /* Check if we're reading from a console or redirected input. */
+    if (GetConsoleMode(h, &mode)) {
+        if (!ReadConsoleA(h, buf, (DWORD)count, &read_count, NULL)) {
+            return -1;
+        }
+    } else {
+        if (!ReadFile(h, buf, (DWORD)count, &read_count, NULL)) {
+            return -1;
+        }
+    }
+    return (int)read_count;
+}
+
+#define write(fd, buf, count) win_write(fd, buf, count)
+#define read(fd, buf, count) win_read(fd, buf, count)
+#endif
 
 /* Compatibility macros mapping old function names to new utf8 module. */
 #define utf8ByteLen         utf8_byte_len
@@ -154,7 +209,11 @@ static int historyAdd(const char *line);
  * The old global API uses a default context for backward compatibility. */
 struct linenoise_context {
     /* Terminal state */
+#ifdef _WIN32
+    DWORD orig_console_mode;
+#else
     struct termios orig_termios;
+#endif
     int rawmode;
     int atexit_registered;
 
@@ -177,7 +236,11 @@ struct linenoise_context {
 static linenoise_completion_cb_t *completionCallback = NULL;
 static linenoise_hints_cb_t *hintsCallback = NULL;
 static linenoise_free_hints_cb_t *freeHintsCallback = NULL;
+#ifdef _WIN32
+static DWORD orig_console_mode; /* In order to restore at exit.*/
+#else
 static struct termios orig_termios; /* In order to restore at exit.*/
+#endif
 static int maskmode = 0; /* Show "***" instead of input. For passwords. */
 static int rawmode = 0; /* For atexit() function to check if restore is needed*/
 static int mlmode = 0;  /* Multi line mode. Default is single line. */
@@ -241,6 +304,10 @@ FILE *lndebug_fp = NULL;
 /* Return true if the terminal name is in the list of terminals we know are
  * not able to understand basic escape sequences. */
 static int isUnsupportedTerm(void) {
+#ifdef _WIN32
+    /* Windows console with VT mode is always supported. */
+    return 0;
+#else
     char *term = getenv("TERM");
     int j;
 
@@ -248,7 +315,118 @@ static int isUnsupportedTerm(void) {
     for (j = 0; unsupported_term[j]; j++)
         if (!strcasecmp(term,unsupported_term[j])) return 1;
     return 0;
+#endif
 }
+
+#ifdef _WIN32
+/* Windows VT mode flags (may not be defined in older SDKs). */
+#ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
+#define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x0004
+#endif
+#ifndef ENABLE_VIRTUAL_TERMINAL_INPUT
+#define ENABLE_VIRTUAL_TERMINAL_INPUT 0x0200
+#endif
+
+static HANDLE hConsoleInput = INVALID_HANDLE_VALUE;
+static HANDLE hConsoleOutput = INVALID_HANDLE_VALUE;
+static DWORD orig_input_mode = 0;
+static DWORD orig_output_mode = 0;
+
+/* Raw mode for Windows using VT100 emulation (Windows 10+). */
+static int enableRawMode(int fd) {
+    DWORD input_mode, output_mode;
+    (void)fd;  /* Unused on Windows. */
+
+    /* Test mode: when LINENOISE_ASSUME_TTY is set, skip terminal setup. */
+    if (getenv("LINENOISE_ASSUME_TTY")) {
+        rawmode = 1;
+        return 0;
+    }
+
+    hConsoleInput = GetStdHandle(STD_INPUT_HANDLE);
+    hConsoleOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+
+    if (hConsoleInput == INVALID_HANDLE_VALUE ||
+        hConsoleOutput == INVALID_HANDLE_VALUE) {
+        return -1;
+    }
+
+    if (!GetConsoleMode(hConsoleInput, &orig_input_mode)) {
+        return -1;
+    }
+    if (!GetConsoleMode(hConsoleOutput, &orig_output_mode)) {
+        return -1;
+    }
+
+    if (!atexit_registered) {
+        atexit(linenoiseAtExit);
+        atexit_registered = 1;
+    }
+
+    /* Configure input: disable line input, echo, and processed input.
+     * Enable VT input for escape sequence support. */
+    input_mode = orig_input_mode;
+    input_mode &= ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT);
+    input_mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
+
+    if (!SetConsoleMode(hConsoleInput, input_mode)) {
+        return -1;
+    }
+
+    /* Configure output: enable VT processing for escape sequences. */
+    output_mode = orig_output_mode;
+    output_mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+
+    if (!SetConsoleMode(hConsoleOutput, output_mode)) {
+        /* VT mode not available, restore input mode. */
+        SetConsoleMode(hConsoleInput, orig_input_mode);
+        return -1;
+    }
+
+    rawmode = 1;
+    return 0;
+}
+
+static void disableRawMode(int fd) {
+    (void)fd;
+
+    if (getenv("LINENOISE_ASSUME_TTY")) {
+        rawmode = 0;
+        return;
+    }
+
+    if (rawmode) {
+        SetConsoleMode(hConsoleInput, orig_input_mode);
+        SetConsoleMode(hConsoleOutput, orig_output_mode);
+        rawmode = 0;
+    }
+}
+
+/* Read a single byte with a timeout on Windows. */
+static int readByteWithTimeout(int fd, char *c, int timeout_ms) {
+    DWORD wait_result;
+    DWORD read_count;
+    (void)fd;
+
+    if (timeout_ms == 0) {
+        /* Non-blocking check. */
+        DWORD events;
+        if (!GetNumberOfConsoleInputEvents(hConsoleInput, &events) || events == 0) {
+            return 0;
+        }
+    } else if (timeout_ms > 0) {
+        wait_result = WaitForSingleObject(hConsoleInput, (DWORD)timeout_ms);
+        if (wait_result == WAIT_TIMEOUT) return 0;
+        if (wait_result != WAIT_OBJECT_0) return -1;
+    }
+
+    if (!ReadConsoleA(hConsoleInput, c, 1, &read_count, NULL)) {
+        return -1;
+    }
+    return (read_count > 0) ? 1 : -1;
+}
+
+#else /* POSIX */
 
 /* Raw mode: 1960 magic shit. */
 static int enableRawMode(int fd) {
@@ -320,6 +498,46 @@ static int readByteWithTimeout(int fd, char *c, int timeout_ms) {
     return read(fd, c, 1);
 }
 
+#endif /* _WIN32 */
+
+#ifdef _WIN32
+
+/* Get terminal columns on Windows. */
+static int getColumns(int ifd, int ofd) {
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    (void)ifd; (void)ofd;
+
+    /* Test mode: use LINENOISE_COLS env var for fixed width. */
+    char *cols_env = getenv("LINENOISE_COLS");
+    if (cols_env) return atoi(cols_env);
+
+    if (GetConsoleScreenBufferInfo(hConsoleOutput, &csbi)) {
+        return csbi.srWindow.Right - csbi.srWindow.Left + 1;
+    }
+    return 80;
+}
+
+/* Internal: Clear the screen on Windows. */
+static void clearScreen(void) {
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    COORD coord = {0, 0};
+    DWORD written, console_size;
+
+    if (!GetConsoleScreenBufferInfo(hConsoleOutput, &csbi)) {
+        /* Fallback to escape sequence. */
+        DWORD dummy;
+        WriteConsoleA(hConsoleOutput, "\x1b[H\x1b[2J", 7, &dummy, NULL);
+        return;
+    }
+
+    console_size = csbi.dwSize.X * csbi.dwSize.Y;
+    FillConsoleOutputCharacterA(hConsoleOutput, ' ', console_size, coord, &written);
+    FillConsoleOutputAttribute(hConsoleOutput, csbi.wAttributes, console_size, coord, &written);
+    SetConsoleCursorPosition(hConsoleOutput, coord);
+}
+
+#else /* POSIX */
+
 /* Use the ESC [6n escape sequence to query the horizontal cursor position
  * and return it. On error -1 is returned, on success the position of the
  * cursor. */
@@ -390,6 +608,8 @@ static void clearScreen(void) {
         /* nothing to do, just to avoid warning. */
     }
 }
+
+#endif /* _WIN32 */
 
 /* Beep, used for completion when there is nothing to complete or when all
  * the choices were already shown. */

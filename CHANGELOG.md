@@ -140,6 +140,20 @@ and context-based state management. The legacy camelCase global API has been rem
   - macOS builds
   - Windows builds with MSVC and MinGW
 
+#### Tree-sitter Integration
+- Added optional tree-sitter based syntax highlighting (`-DWITH_TREESITTER=ON`, default)
+  - `src/highlight_lua.c` and `internal/highlight_lua.h` - Lua syntax highlighter module
+  - `lua_highlight_init()` - Initialize tree-sitter Lua parser and query
+  - `lua_highlight_free()` - Free tree-sitter resources
+  - `lua_highlight_callback()` - Highlight callback for use with `linenoise_set_highlight_callback()`
+- Added `example-lua.c` - Lua REPL demonstrating tree-sitter syntax highlighting
+  - Real-time Lua syntax highlighting as you type
+  - Keyword completion for Lua reserved words and built-in functions
+  - Context-sensitive hints for common Lua constructs
+- Tree-sitter libraries built from source in `thirdparty/`:
+  - `thirdparty/tree-sitter/` - Tree-sitter parser library
+  - `thirdparty/tree-sitter-lua/` - Lua grammar for tree-sitter
+
 ### Fixed
 
 #### Critical Bug Fixes (P0)

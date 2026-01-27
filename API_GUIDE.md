@@ -577,6 +577,106 @@ LINENOISE_SEQ_SIZE              // 64 - Internal escape sequence buffer
 
 ---
 
+## Tree-sitter Syntax Highlighting
+
+Linenoise includes optional tree-sitter based syntax highlighting support. The Lua example demonstrates this feature.
+
+### Building with Tree-sitter
+
+Tree-sitter support is enabled by default when building with CMake:
+
+```bash
+mkdir build && cd build
+cmake ..
+make
+```
+
+To disable tree-sitter support:
+
+```bash
+cmake -DWITH_TREESITTER=OFF ..
+```
+
+### Running the Lua Example
+
+```bash
+./build/linenoise-lua
+```
+
+Try typing Lua code to see syntax highlighting in action:
+- Keywords (function, if, while, etc.) - bold magenta
+- Strings - green
+- Numbers - yellow
+- Comments - cyan
+- Function names - bold blue
+- Booleans (true, false, nil) - bold yellow
+
+### Using Tree-sitter for Custom Languages
+
+To add syntax highlighting for other languages:
+
+1. Add the tree-sitter grammar to `thirdparty/`
+2. Create a highlighter module similar to `src/highlight_lua.c`
+3. Define a highlights query (or use the grammar's existing `queries/highlights.scm`)
+4. Map capture names to linenoise color codes (0-7, +8 for bold)
+5. Register your callback with `linenoise_set_highlight_callback()`
+
+Example highlighter structure:
+
+```c
+#include <tree_sitter/api.h>
+
+extern const TSLanguage *tree_sitter_your_language(void);
+
+static TSParser *parser = NULL;
+static TSQuery *query = NULL;
+static TSQueryCursor *cursor = NULL;
+
+int your_highlight_init(void) {
+    parser = ts_parser_new();
+    ts_parser_set_language(parser, tree_sitter_your_language());
+
+    // Create query from highlights.scm patterns
+    uint32_t error_offset;
+    TSQueryError error_type;
+    query = ts_query_new(tree_sitter_your_language(),
+                         YOUR_HIGHLIGHT_QUERY, strlen(YOUR_HIGHLIGHT_QUERY),
+                         &error_offset, &error_type);
+
+    cursor = ts_query_cursor_new();
+    return 0;
+}
+
+void your_highlight_callback(const char *buf, char *colors, size_t len) {
+    TSTree *tree = ts_parser_parse_string(parser, NULL, buf, (uint32_t)len);
+    TSNode root = ts_tree_root_node(tree);
+
+    ts_query_cursor_exec(cursor, query, root);
+
+    TSQueryMatch match;
+    uint32_t capture_index;
+    while (ts_query_cursor_next_capture(cursor, &match, &capture_index)) {
+        TSQueryCapture capture = match.captures[capture_index];
+        uint32_t start = ts_node_start_byte(capture.node);
+        uint32_t end = ts_node_end_byte(capture.node);
+
+        // Get capture name and map to color
+        uint32_t name_len;
+        const char *name = ts_query_capture_name_for_id(query, capture.index, &name_len);
+        char color = map_capture_to_color(name, name_len);
+
+        // Apply color to byte range
+        for (uint32_t i = start; i < end && i < len; i++) {
+            if (colors[i] == 0) colors[i] = color;
+        }
+    }
+
+    ts_tree_delete(tree);
+}
+```
+
+---
+
 ## Migration from 1.x
 
 See [CHANGELOG.md](CHANGELOG.md) for detailed migration instructions. Key changes:

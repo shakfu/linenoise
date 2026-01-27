@@ -12,6 +12,9 @@ else()
     add_compile_options(-Wall -Wextra -pedantic)
 endif()
 
+# Tree-sitter support option
+option(WITH_TREESITTER "Build with tree-sitter syntax highlighting support" ON)
+
 # Platform-specific terminal implementation
 if(WIN32)
     set(TERMINAL_SRC src/terminal_windows.c)
@@ -65,6 +68,67 @@ option(BUILD_EXAMPLES "Build example application" ON)
 if(BUILD_EXAMPLES)
     add_executable(linenoise-example example.c)
     target_link_libraries(linenoise-example PRIVATE linenoise)
+endif()
+
+# Tree-sitter based Lua example with syntax highlighting
+if(WITH_TREESITTER AND BUILD_EXAMPLES)
+    # Tree-sitter library sources
+    set(TREESITTER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/tree-sitter)
+    set(TREESITTER_LUA_DIR ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/tree-sitter-lua)
+
+    # Build tree-sitter as a static library
+    # lib.c includes all other source files
+    add_library(tree-sitter STATIC
+        ${TREESITTER_DIR}/lib/src/lib.c
+    )
+    target_include_directories(tree-sitter
+        PUBLIC
+            ${TREESITTER_DIR}/lib/include
+        PRIVATE
+            ${TREESITTER_DIR}/lib/src
+    )
+    # Silence warnings in third-party code
+    target_compile_options(tree-sitter PRIVATE -w)
+
+    # Build tree-sitter-lua grammar
+    add_library(tree-sitter-lua STATIC
+        ${TREESITTER_LUA_DIR}/src/parser.c
+        ${TREESITTER_LUA_DIR}/src/scanner.c
+    )
+    target_include_directories(tree-sitter-lua
+        PRIVATE
+            ${TREESITTER_LUA_DIR}/src
+            ${TREESITTER_DIR}/lib/include
+    )
+    # Silence warnings in third-party code
+    target_compile_options(tree-sitter-lua PRIVATE -w)
+
+    # Lua highlighter module
+    add_library(linenoise-highlight-lua STATIC
+        src/highlight_lua.c
+    )
+    target_include_directories(linenoise-highlight-lua
+        PUBLIC
+            ${CMAKE_CURRENT_SOURCE_DIR}
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/internal
+            ${TREESITTER_DIR}/lib/include
+    )
+    target_link_libraries(linenoise-highlight-lua
+        PRIVATE tree-sitter tree-sitter-lua
+    )
+
+    # Lua REPL example with syntax highlighting
+    add_executable(linenoise-lua example-lua.c)
+    target_include_directories(linenoise-lua
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_link_libraries(linenoise-lua
+        PRIVATE linenoise linenoise-highlight-lua tree-sitter tree-sitter-lua
+    )
+
+    message(STATUS "  Tree-sitter Lua example: ON")
 endif()
 
 # Tests

@@ -8,3 +8,6 @@ __pycache__
 build/
 .*_cache
 .cache
+.claude
+CLAUDE.md
+.lua_history

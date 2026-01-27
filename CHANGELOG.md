@@ -86,7 +86,7 @@ and context-based state management. The legacy camelCase global API has been rem
 ### Fixed
 
 #### Critical Bug Fixes (P0)
-- **Memory leak in completion handling**: Fixed `freeCompletions()` logic that was
+- **Memory leak in completion handling**: Fixed `free_completions()` logic that was
   incorrectly checking `lc != &ctable` instead of `lc == &ctable`, causing memory
   leaks when using the internal completion table.
 

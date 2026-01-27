@@ -6,9 +6,9 @@ Prioritized task list derived from architectural review. Items ordered by depend
 
 ## P0: Critical Bug Fixes
 
-- [x] **Fix freeCompletions logic (line 702)**
-  - Was: `if (lc != &ctable) freeCompletions(&ctable);`
-  - Fixed: `if (lc == &ctable) freeCompletions(&ctable);`
+- [x] **Fix free_completions logic (line 702)**
+  - Was: `if (lc != &ctable) free_completions(&ctable);`
+  - Fixed: `if (lc == &ctable) free_completions(&ctable);`
   - Impact: Memory leak when using internal completion table
 
 - [x] **Add timeout to escape sequence reads (lines 1420-1431)**
@@ -164,7 +164,7 @@ Prioritized task list derived from architectural review. Items ordered by depend
 
 - [ ] **Create `src/completion.c`**
   - Move lines 661-802 from linenoise.c
-  - `completeLine()`, `freeCompletions()`, `refreshLineWithCompletion()`
+  - `completeLine()`, `free_completions()`, `refreshLineWithCompletion()`
 
 ### 3.3 Implement Key Parser
 

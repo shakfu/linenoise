@@ -1,4 +1,4 @@
-# Linenoise Code and Architectural Review
+Add# Linenoise Code and Architectural Review
 
 ## Executive Summary
 
@@ -452,7 +452,7 @@ size_t linenoiseGetBufferLen(linenoiseState *l);
 
 ### 6.3 Potential Bugs/Issues
 
-1. **Line 700:** `freeCompletions(&ctable)` - Should only free if `lc != &ctable` (logic inverted?)
+1. **Line 700:** `free_completions(&ctable)` - Should only free if `lc != &ctable` (logic inverted?)
 2. **Line 1727-1732:** `umask`/`fchmod` - Race condition between umask and fopen
 3. **Line 1548:** `memmove(quit,quit+1,...)` - Overlapping regions (safe but suspicious)
 4. **Escape sequence timeout:** No timeout on multi-byte reads in escape sequence parsing

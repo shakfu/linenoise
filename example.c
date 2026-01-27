@@ -4,10 +4,10 @@
 #include <sys/select.h>
 #include "linenoise.h"
 
-void completion(const char *buf, linenoiseCompletions *lc) {
+void completion(const char *buf, linenoise_completions_t *lc) {
     if (buf[0] == 'h') {
-        linenoiseAddCompletion(lc,"hello");
-        linenoiseAddCompletion(lc,"hello there");
+        linenoise_add_completion(lc,"hello");
+        linenoise_add_completion(lc,"hello there");
     }
 }
 
@@ -24,16 +24,17 @@ int main(int argc, char **argv) {
     char *line;
     char *prgname = argv[0];
     int async = 0;
+    int multiline = 0;
 
     /* Parse options, with --multiline we enable multi line editing. */
     while(argc > 1) {
         argc--;
         argv++;
         if (!strcmp(*argv,"--multiline")) {
-            linenoiseSetMultiLine(1);
+            multiline = 1;
             printf("Multi-line mode enabled.\n");
         } else if (!strcmp(*argv,"--keycodes")) {
-            linenoisePrintKeyCodes();
+            linenoise_print_key_codes();
             exit(0);
         } else if (!strcmp(*argv,"--async")) {
             async = 1;
@@ -43,17 +44,29 @@ int main(int argc, char **argv) {
         }
     }
 
+    /* Create a linenoise context. */
+    linenoise_context_t *ctx = linenoise_context_create();
+    if (!ctx) {
+        fprintf(stderr, "Failed to create linenoise context\n");
+        exit(1);
+    }
+
+    /* Configure the context. */
+    if (multiline) {
+        linenoise_set_multiline(ctx, 1);
+    }
+
     /* Set the completion callback. This will be called every time the
      * user uses the <tab> key. */
-    linenoiseSetCompletionCallback(completion);
-    linenoiseSetHintsCallback(hints);
+    linenoise_set_completion_callback(ctx, completion);
+    linenoise_set_hints_callback(ctx, hints);
 
     /* Load history from file. The history file is just a plain text file
      * where entries are separated by newlines. */
-    linenoiseHistoryLoad("history.txt"); /* Load the history at startup */
+    linenoise_history_load(ctx, "history.txt"); /* Load the history at startup */
 
     /* Now this is the main loop of the typical linenoise-based application.
-     * The call to linenoise() will block as long as the user types something
+     * The call to linenoise_read() will block as long as the user types something
      * and presses enter.
      *
      * The typed string is returned as a malloc() allocated string by
@@ -61,15 +74,15 @@ int main(int argc, char **argv) {
 
     while(1) {
         if (!async) {
-            line = linenoise("hello> ");
+            line = linenoise_read(ctx, "hello> ");
             if (line == NULL) break;
         } else {
             /* Asynchronous mode using the multiplexing API: wait for
              * data on stdin, and simulate async data coming from some source
              * using the select(2) timeout. */
-            struct linenoiseState ls;
+            linenoise_state_t ls;
             char buf[1024];
-            linenoiseEditStart(&ls,-1,-1,buf,sizeof(buf),"hello> ");
+            linenoise_edit_start(ctx, &ls,-1,-1,buf,sizeof(buf),"hello> ");
             while(1) {
 		fd_set readfds;
 		struct timeval tv;
@@ -85,40 +98,42 @@ int main(int argc, char **argv) {
 		    perror("select()");
                     exit(1);
 		} else if (retval) {
-		    line = linenoiseEditFeed(&ls);
+		    line = linenoise_edit_feed(&ls);
                     /* A NULL return means: line editing is continuing.
                      * Otherwise the user hit enter or stopped editing
                      * (CTRL+C/D). */
-                    if (line != linenoiseEditMore) break;
+                    if (line != linenoise_edit_more) break;
 		} else {
 		    // Timeout occurred
                     static int counter = 0;
-                    linenoiseHide(&ls);
+                    linenoise_hide(&ls);
 		    printf("Async output %d.\n", counter++);
-                    linenoiseShow(&ls);
+                    linenoise_show(&ls);
 		}
             }
-            linenoiseEditStop(&ls);
-            if (line == NULL) exit(0); /* Ctrl+D/C. */
+            linenoise_edit_stop(&ls);
+            if (line == NULL) break; /* Ctrl+D/C. */
         }
 
         /* Do something with the string. */
         if (line[0] != '\0' && line[0] != '/') {
             printf("echo: '%s'\n", line);
-            linenoiseHistoryAdd(line); /* Add to the history. */
-            linenoiseHistorySave("history.txt"); /* Save the history on disk. */
+            linenoise_history_add(ctx, line); /* Add to the history. */
+            linenoise_history_save(ctx, "history.txt"); /* Save the history on disk. */
         } else if (!strncmp(line,"/historylen",11)) {
             /* The "/historylen" command will change the history len. */
             int len = atoi(line+11);
-            linenoiseHistorySetMaxLen(len);
+            linenoise_history_set_max_len(ctx, len);
         } else if (!strncmp(line, "/mask", 5)) {
-            linenoiseMaskModeEnable();
+            linenoise_set_mask_mode(ctx, 1);
         } else if (!strncmp(line, "/unmask", 7)) {
-            linenoiseMaskModeDisable();
+            linenoise_set_mask_mode(ctx, 0);
         } else if (line[0] == '/') {
             printf("Unreconized command: %s\n", line);
         }
-        free(line);
+        linenoise_free(line);
     }
+
+    linenoise_context_destroy(ctx);
     return 0;
 }

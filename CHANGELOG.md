@@ -58,6 +58,20 @@ and context-based state management. The legacy camelCase global API has been rem
 - Created terminal abstraction layer in `internal/terminal.h` and `src/terminal_posix.c`
   - Prepares codebase for Windows support
   - Clean separation of terminal I/O from editing logic
+- Created history module in `src/history.c` and `internal/history.h`
+  - Opaque `history_t` struct for encapsulation
+  - FIFO rotation, duplicate prevention, secure file I/O
+- Created completion module in `src/completion.c` and `internal/completion.h`
+  - Reusable completion list management
+  - Dynamic array growth for candidates
+- Created key parser module in `src/keyparser.c` and `internal/keyparser.h`
+  - State machine for escape sequence parsing
+  - Support for arrows, function keys, modifiers (Ctrl/Alt/Shift)
+  - Configurable escape timeout for standalone ESC key
+- Created rendering module in `src/render.c` and `internal/render.h`
+  - Pure functions for escape sequence generation
+  - Separated from I/O for testability
+  - Single-line and multi-line rendering support
 
 #### Windows Support
 - Added Windows 10+ support using Virtual Terminal (VT) mode

@@ -140,71 +140,75 @@ Prioritized task list derived from architectural review. Items ordered by depend
 
 ### 3.1 Extract History Module
 
-- [ ] **Create `internal/history.h`**
-  ```c
-  typedef struct history_t history_t;
-  history_t *history_create(int max_len);
-  void history_destroy(history_t *h);
-  int history_add(history_t *h, const char *line);
-  const char *history_get(history_t *h, int index);
-  int history_len(history_t *h);
-  int history_save(history_t *h, const char *filename);
-  int history_load(history_t *h, const char *filename);
-  ```
+- [x] **Create `internal/history.h`**
+  - Opaque `history_t` struct
+  - Functions: `history_create`, `history_destroy`, `history_add`, `history_get`,
+    `history_len`, `history_max_len`, `history_set_max_len`, `history_save`,
+    `history_load`, `history_clear`, `history_dup`, `history_set`
 
-- [ ] **Create `src/history.c`**
-  - Move lines 1636-1762 from linenoise.c
-  - Encapsulate history array in opaque struct
+- [x] **Create `src/history.c`**
+  - Full implementation with opaque struct encapsulation
+  - FIFO rotation when max capacity reached
+  - Duplicate entry prevention
+  - File I/O with secure permissions (0600)
 
-- [ ] **Add unit tests (`test/test_history.c`)**
+- [ ] **Add unit tests (`test/test_history.c`)** (deferred)
+
+- [ ] **Integrate with linenoise.c** (deferred - module ready for use)
 
 ### 3.2 Extract Completion Module
 
-- [ ] **Create `internal/completion.h`**
+- [x] **Create `internal/completion.h`**
+  - `completions_t` struct (exposed for callback API)
+  - Functions: `completions_init`, `completions_add`, `completions_get`,
+    `completions_len`, `completions_free`, `completions_clear`
 
-- [ ] **Create `src/completion.c`**
-  - Move lines 661-802 from linenoise.c
-  - `completeLine()`, `free_completions()`, `refreshLineWithCompletion()`
+- [x] **Create `src/completion.c`**
+  - Full implementation of completion list management
+  - Dynamic array growth for completion candidates
+
+- [ ] **Integrate with linenoise.c** (deferred - module ready for use)
 
 ### 3.3 Implement Key Parser
 
-- [ ] **Create `internal/keyparser.h`**
-  ```c
-  typedef enum {
-      KEY_CHAR, KEY_CTRL, KEY_ARROW_UP, KEY_ARROW_DOWN,
-      KEY_ARROW_LEFT, KEY_ARROW_RIGHT, KEY_HOME, KEY_END,
-      KEY_DELETE, KEY_BACKSPACE, KEY_TAB, KEY_ENTER,
-      KEY_F1, KEY_F2, KEY_F3, KEY_F4, /* ... */
-      KEY_UNKNOWN
-  } keycode_t;
+- [x] **Create `internal/keyparser.h`**
+  - `keycode_t` enum with all key codes (control, arrows, function keys, modifiers)
+  - `key_event_t` struct with code, UTF-8 data, and modifier flags
+  - `keyparser_t` opaque parser state
+  - Functions: `keyparser_create`, `keyparser_destroy`, `keyparser_read`,
+    `keyparser_set_timeout`, `keyparser_keyname`
 
-  typedef struct {
-      keycode_t code;
-      char utf8[8];
-      int utf8_len;
-      int modifiers;  // SHIFT, ALT, CTRL flags
-  } key_event_t;
+- [x] **Create `src/keyparser.c`**
+  - CSI sequence parsing (ESC [ ...)
+  - SS3 sequence parsing (ESC O ...)
+  - Alt+letter combinations
+  - Modified arrow key support (Ctrl/Alt/Shift + arrows)
+  - Function key support (F1-F12)
+  - UTF-8 multi-byte sequence handling
+  - Configurable escape timeout
 
-  int keyparser_read(terminal_ops_t *term, key_event_t *event);
-  ```
-
-- [ ] **Create `src/keyparser.c`**
-  - State machine for escape sequence parsing
-  - Support for extended sequences (F-keys, etc.)
-  - Timeout handling for partial sequences
-
-- [ ] **Update linenoiseEditFeed() to use key parser**
+- [ ] **Update linenoise_edit_feed() to use key parser** (deferred)
 
 ### 3.4 Separate Rendering from I/O
 
-- [ ] **Create pure rendering function**
-  ```c
-  // Returns length written to outbuf
-  int render_line(const linenoiseState *state, char *outbuf, size_t outbuf_size);
-  ```
+- [x] **Create `internal/render.h`**
+  - `render_state_t` struct with all display state
+  - `render_buf_t` append buffer for building output
+  - Functions: `render_buf_init`, `render_buf_append`, `render_buf_printf`,
+    `render_buf_free`, `render_buf_reset`
+  - Rendering: `render_single_line`, `render_multi_line`, `render_hint`
+  - Helpers: `render_str_width`, `render_cursor_to_col`, `render_cursor_up`,
+    `render_cursor_down`, `render_clear_eol`, `render_cr`
 
-- [ ] **Add unit tests for rendering**
-  - Test escape sequence generation without terminal
+- [x] **Create `src/render.c`**
+  - Pure functions generating escape sequences without I/O
+  - Single-line rendering with horizontal scrolling
+  - Multi-line rendering with cursor positioning
+  - Hint rendering with color/bold support
+
+- [ ] **Add unit tests for rendering** (deferred)
+
+- [ ] **Integrate with linenoise.c** (deferred - module ready for use)
 
 ---
 
@@ -337,7 +341,7 @@ linenoise/
 | P0       | Critical Bug Fixes      | 3     | 3    |
 | P1       | Foundation (Windows)    | 12    | 11   |
 | P2       | Windows Support         | 8     | 6    |
-| P3       | Modularization          | 10    | 0    |
+| P3       | Modularization          | 14    | 8    |
 | P4       | Code Quality            | 5     | 0    |
 | P5       | Enhancements            | 5     | 0    |
-| **Total**|                         | **43**| **20**|
+| **Total**|                         | **47**| **28**|

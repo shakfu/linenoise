@@ -19,10 +19,19 @@ else()
     set(TERMINAL_SRC src/terminal_posix.c)
 endif()
 
+# Module source files
+set(MODULE_SOURCES
+    src/utf8.c
+    src/history.c
+    src/completion.c
+    src/keyparser.c
+    src/render.c
+)
+
 # Core library source files
 set(LINENOISE_SOURCES
     linenoise.c
-    src/utf8.c
+    ${MODULE_SOURCES}
     ${TERMINAL_SRC}
 )
 

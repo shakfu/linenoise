@@ -115,12 +115,20 @@
 #include <windows.h>
 #include <io.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #define isatty _isatty
 #define strcasecmp _stricmp
 #define snprintf _snprintf
 /* Windows doesn't have these, stub them out. */
 #define STDIN_FILENO 0
 #define STDOUT_FILENO 1
+/* POSIX permission flags for open() */
+#ifndef S_IRUSR
+#define S_IRUSR _S_IREAD
+#endif
+#ifndef S_IWUSR
+#define S_IWUSR _S_IWRITE
+#endif
 #else
 /* POSIX-specific includes. */
 #include <termios.h>
@@ -2337,7 +2345,11 @@ linenoise_context_t *linenoise_context_create(void) {
     linenoise_context_t *ctx = ln_malloc(sizeof(linenoise_context_t));
     if (!ctx) return NULL;
 
+#ifdef _WIN32
+    ctx->orig_console_mode = 0;
+#else
     memset(&ctx->orig_termios, 0, sizeof(ctx->orig_termios));
+#endif
     ctx->rawmode = 0;
     ctx->atexit_registered = 0;
     ctx->maskmode = 0;

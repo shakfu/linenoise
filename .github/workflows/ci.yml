@@ -16,31 +16,19 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Build with Make
+    - name: Configure
       run: |
         if [ "${{ matrix.compiler }}" = "clang" ]; then
-          export CC=clang
-        fi
-        make clean
-        make
-
-    - name: Run tests (Make)
-      run: make test
-
-    - name: Build with CMake
-      run: |
-        mkdir build && cd build
-        if [ "${{ matrix.compiler }}" = "clang" ]; then
-          cmake -DCMAKE_C_COMPILER=clang ..
+          cmake -B build -DCMAKE_C_COMPILER=clang
         else
-          cmake ..
+          cmake -B build
         fi
-        cmake --build .
 
-    - name: Run tests (CMake)
-      run: |
-        cd build
-        ctest --output-on-failure
+    - name: Build
+      run: cmake --build build
+
+    - name: Test
+      run: ctest --test-dir build --output-on-failure
 
   build-macos:
     runs-on: macos-latest
@@ -48,24 +36,14 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Build with Make
-      run: |
-        make clean
-        make
+    - name: Configure
+      run: cmake -B build
 
-    - name: Run tests (Make)
-      run: make test
+    - name: Build
+      run: cmake --build build
 
-    - name: Build with CMake
-      run: |
-        mkdir build && cd build
-        cmake ..
-        cmake --build .
-
-    - name: Run tests (CMake)
-      run: |
-        cd build
-        ctest --output-on-failure
+    - name: Test
+      run: ctest --test-dir build --output-on-failure
 
   build-windows:
     runs-on: windows-latest
@@ -81,18 +59,14 @@ jobs:
       with:
         arch: ${{ matrix.arch }}
 
-    - name: Build with CMake
-      run: |
-        mkdir build
-        cd build
-        cmake -G "NMake Makefiles" ..
-        cmake --build .
+    - name: Configure
+      run: cmake -B build -G "NMake Makefiles"
 
-    - name: Run example (smoke test)
-      run: |
-        cd build
-        echo "hello" | .\linenoise-example.exe
-      shell: cmd
+    - name: Build
+      run: cmake --build build
+
+    - name: Test
+      run: ctest --test-dir build --output-on-failure
 
   build-windows-mingw:
     runs-on: windows-latest
@@ -107,15 +81,14 @@ jobs:
         update: true
         install: mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake make
 
-    - name: Build with CMake (MinGW)
+    - name: Configure
       shell: msys2 {0}
-      run: |
-        mkdir build && cd build
-        cmake -G "Unix Makefiles" ..
-        cmake --build .
+      run: cmake -B build -G "Unix Makefiles"
 
-    - name: Run example (smoke test)
+    - name: Build
       shell: msys2 {0}
-      run: |
-        cd build
-        echo "hello" | ./linenoise-example.exe
+      run: cmake --build build
+
+    - name: Test
+      shell: msys2 {0}
+      run: ctest --test-dir build --output-on-failure

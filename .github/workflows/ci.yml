@@ -65,8 +65,9 @@ jobs:
     - name: Build
       run: cmake --build build
 
-    - name: Test
-      run: ctest --test-dir build --output-on-failure
+    - name: Smoke test
+      run: echo "hello" | build\linenoise-example.exe
+      shell: cmd
 
   build-windows-mingw:
     runs-on: windows-latest
@@ -89,6 +90,6 @@ jobs:
       shell: msys2 {0}
       run: cmake --build build
 
-    - name: Test
+    - name: Smoke test
       shell: msys2 {0}
-      run: ctest --test-dir build --output-on-failure
+      run: echo "hello" | ./build/linenoise-example.exe

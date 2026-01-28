@@ -376,9 +376,9 @@ if(WITH_TREESITTER AND BUILD_EXAMPLES)
     message(STATUS "  Multi-language syntax test: ON")
 endif()
 
-# Tests
+# Tests (POSIX only - uses fork/waitpid/select)
 option(BUILD_TESTS "Build test suite" ON)
-if(BUILD_TESTS)
+if(BUILD_TESTS AND NOT WIN32)
     enable_testing()
 
     add_executable(linenoise-test test/linenoise-test.c src/internal/utf8.c)

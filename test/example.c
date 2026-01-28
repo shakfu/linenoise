@@ -1,7 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
 #include <sys/select.h>
+#endif
 #include "linenoise.h"
 
 void completion(const char *buf, linenoise_completions_t *lc) {

@@ -25,7 +25,9 @@ char *hints(const char *buf, int *color, int *bold) {
 int main(int argc, char **argv) {
     char *line;
     char *prgname = argv[0];
+#ifndef _WIN32
     int async = 0;
+#endif
     int multiline = 0;
 
     /* Parse options, with --multiline we enable multi line editing. */
@@ -38,10 +40,16 @@ int main(int argc, char **argv) {
         } else if (!strcmp(*argv,"--keycodes")) {
             linenoise_print_key_codes();
             exit(0);
+#ifndef _WIN32
         } else if (!strcmp(*argv,"--async")) {
             async = 1;
+#endif
         } else {
+#ifdef _WIN32
+            fprintf(stderr, "Usage: %s [--multiline] [--keycodes]\n", prgname);
+#else
             fprintf(stderr, "Usage: %s [--multiline] [--keycodes] [--async]\n", prgname);
+#endif
             exit(1);
         }
     }
@@ -75,6 +83,11 @@ int main(int argc, char **argv) {
      * linenoise, so the user needs to free() it. */
 
     while(1) {
+#ifdef _WIN32
+        /* On Windows, only synchronous mode is supported. */
+        line = linenoise_read(ctx, "hello> ");
+        if (line == NULL) break;
+#else
         if (!async) {
             line = linenoise_read(ctx, "hello> ");
             if (line == NULL) break;
@@ -116,6 +129,7 @@ int main(int argc, char **argv) {
             linenoise_edit_stop(&ls);
             if (line == NULL) break; /* Ctrl+D/C. */
         }
+#endif
 
         /* Do something with the string. */
         if (line[0] != '\0' && line[0] != '/') {

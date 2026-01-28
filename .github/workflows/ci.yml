@@ -65,8 +65,12 @@ jobs:
     - name: Build
       run: cmake --build build
 
-    - name: Smoke test
+    - name: Smoke test (basic)
       run: echo "hello" | build\linenoise-example.exe
+      shell: cmd
+
+    - name: Smoke test (tree-sitter syntax)
+      run: echo "print('hello')" | build\linenoise-syntax.exe python
       shell: cmd
 
   build-windows-mingw:
@@ -90,6 +94,10 @@ jobs:
       shell: msys2 {0}
       run: cmake --build build
 
-    - name: Smoke test
+    - name: Smoke test (basic)
       shell: msys2 {0}
       run: echo "hello" | ./build/linenoise-example.exe
+
+    - name: Smoke test (tree-sitter syntax)
+      shell: msys2 {0}
+      run: echo "print('hello')" | ./build/linenoise-syntax.exe python

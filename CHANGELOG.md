@@ -156,6 +156,22 @@ and context-based state management. The legacy camelCase global API has been rem
 
 ### Fixed
 
+#### MSVC Compatibility
+- **snprintf null-termination**: Added wrapper for MSVC's `_snprintf` which doesn't
+  null-terminate on buffer overflow, unlike POSIX `snprintf`. The wrapper ensures
+  the buffer is always null-terminated.
+
+- **vsnprintf return value**: Added wrapper for MSVC's `_vsnprintf` which returns -1
+  when the buffer is too small instead of the required size. Uses `_vscprintf` to
+  get the correct required buffer size for dynamic allocation.
+
+- **Compiler warning flags**: Fixed tree-sitter library build flags to use `/w`
+  on MSVC instead of `-w` (GCC/Clang) for warning suppression.
+
+- **POSIX function deprecation warnings**: Added `_CRT_SECURE_NO_WARNINGS` to
+  suppress MSVC deprecation warnings for POSIX-like function names (`strdup`,
+  `stricmp`, `open`, `close`, etc.).
+
 #### Critical Bug Fixes (P0)
 - **Memory leak in completion handling**: Fixed `free_completions()` logic that was
   incorrectly checking `lc != &ctable` instead of `lc == &ctable`, causing memory

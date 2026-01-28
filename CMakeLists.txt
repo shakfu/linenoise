@@ -8,6 +8,8 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 # Compiler warnings
 if(MSVC)
     add_compile_options(/W4)
+    # Suppress deprecation warnings for POSIX function names like strdup, stricmp, etc.
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 else()
     add_compile_options(-Wall -Wextra -pedantic)
 endif()
@@ -95,7 +97,11 @@ if(WITH_TREESITTER AND BUILD_EXAMPLES)
             ${TREESITTER_DIR}/lib/src
     )
     # Silence warnings in third-party code
-    target_compile_options(tree-sitter PRIVATE -w)
+    if(MSVC)
+        target_compile_options(tree-sitter PRIVATE /w)
+    else()
+        target_compile_options(tree-sitter PRIVATE -w)
+    endif()
 
     # Syntax highlighting theme library
     add_library(linenoise-theme STATIC
@@ -116,7 +122,11 @@ if(WITH_TREESITTER AND BUILD_EXAMPLES)
             ${TREESITTER_LUA_DIR}/src
             ${TREESITTER_DIR}/lib/include
     )
-    target_compile_options(tree-sitter-lua PRIVATE -w)
+    if(MSVC)
+        target_compile_options(tree-sitter-lua PRIVATE /w)
+    else()
+        target_compile_options(tree-sitter-lua PRIVATE -w)
+    endif()
 
     # Lua highlighter module
     add_library(linenoise-highlight-lua STATIC
@@ -155,7 +165,11 @@ if(WITH_TREESITTER AND BUILD_EXAMPLES)
             ${TREESITTER_PYTHON_DIR}/src
             ${TREESITTER_DIR}/lib/include
     )
-    target_compile_options(tree-sitter-python PRIVATE -w)
+    if(MSVC)
+        target_compile_options(tree-sitter-python PRIVATE /w)
+    else()
+        target_compile_options(tree-sitter-python PRIVATE -w)
+    endif()
 
     # Python highlighter module
     add_library(linenoise-highlight-python STATIC
@@ -183,7 +197,11 @@ if(WITH_TREESITTER AND BUILD_EXAMPLES)
             ${TREESITTER_SCHEME_DIR}/src
             ${TREESITTER_DIR}/lib/include
     )
-    target_compile_options(tree-sitter-scheme PRIVATE -w)
+    if(MSVC)
+        target_compile_options(tree-sitter-scheme PRIVATE /w)
+    else()
+        target_compile_options(tree-sitter-scheme PRIVATE -w)
+    endif()
 
     # Scheme highlighter module
     add_library(linenoise-highlight-scheme STATIC
@@ -212,7 +230,11 @@ if(WITH_TREESITTER AND BUILD_EXAMPLES)
             ${TREESITTER_HASKELL_DIR}/src
             ${TREESITTER_DIR}/lib/include
     )
-    target_compile_options(tree-sitter-haskell PRIVATE -w)
+    if(MSVC)
+        target_compile_options(tree-sitter-haskell PRIVATE /w)
+    else()
+        target_compile_options(tree-sitter-haskell PRIVATE -w)
+    endif()
 
     # Haskell highlighter module
     add_library(linenoise-highlight-haskell STATIC
@@ -240,7 +262,11 @@ if(WITH_TREESITTER AND BUILD_EXAMPLES)
             ${TREESITTER_FORTH_DIR}/src
             ${TREESITTER_DIR}/lib/include
     )
-    target_compile_options(tree-sitter-forth PRIVATE -w)
+    if(MSVC)
+        target_compile_options(tree-sitter-forth PRIVATE /w)
+    else()
+        target_compile_options(tree-sitter-forth PRIVATE -w)
+    endif()
 
     # Forth highlighter module
     add_library(linenoise-highlight-forth STATIC
@@ -268,7 +294,11 @@ if(WITH_TREESITTER AND BUILD_EXAMPLES)
             ${TREESITTER_FAUST_DIR}/src
             ${TREESITTER_DIR}/lib/include
     )
-    target_compile_options(tree-sitter-faust PRIVATE -w)
+    if(MSVC)
+        target_compile_options(tree-sitter-faust PRIVATE /w)
+    else()
+        target_compile_options(tree-sitter-faust PRIVATE -w)
+    endif()
 
     # Faust highlighter module
     add_library(linenoise-highlight-faust STATIC
@@ -296,7 +326,11 @@ if(WITH_TREESITTER AND BUILD_EXAMPLES)
             ${TREESITTER_CHUCK_DIR}/src
             ${TREESITTER_DIR}/lib/include
     )
-    target_compile_options(tree-sitter-chuck PRIVATE -w)
+    if(MSVC)
+        target_compile_options(tree-sitter-chuck PRIVATE /w)
+    else()
+        target_compile_options(tree-sitter-chuck PRIVATE -w)
+    endif()
 
     # ChucK highlighter module
     add_library(linenoise-highlight-chuck STATIC
@@ -325,7 +359,11 @@ if(WITH_TREESITTER AND BUILD_EXAMPLES)
             ${TREESITTER_MARKDOWN_DIR}/src
             ${TREESITTER_DIR}/lib/include
     )
-    target_compile_options(tree-sitter-markdown PRIVATE -w)
+    if(MSVC)
+        target_compile_options(tree-sitter-markdown PRIVATE /w)
+    else()
+        target_compile_options(tree-sitter-markdown PRIVATE -w)
+    endif()
 
     # Markdown highlighter module
     add_library(linenoise-highlight-markdown STATIC

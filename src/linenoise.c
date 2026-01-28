@@ -116,9 +116,20 @@
 #include <io.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <stdarg.h>
 #define isatty _isatty
 #define strcasecmp _stricmp
-#define snprintf _snprintf
+/* MSVC's _snprintf doesn't null-terminate on overflow, so wrap it. */
+static int linenoise_snprintf(char *buf, size_t size, const char *fmt, ...) {
+    va_list ap;
+    int ret;
+    va_start(ap, fmt);
+    ret = _vsnprintf(buf, size, fmt, ap);
+    va_end(ap);
+    if (size > 0) buf[size - 1] = '\0';
+    return ret;
+}
+#define snprintf linenoise_snprintf
 /* Windows doesn't have these, stub them out. */
 #define STDIN_FILENO 0
 #define STDOUT_FILENO 1

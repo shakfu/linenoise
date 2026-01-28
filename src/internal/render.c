@@ -36,6 +36,30 @@
 #include <stdio.h>
 #include <stdarg.h>
 
+#ifdef _WIN32
+/* MSVC's _vsnprintf doesn't null-terminate on overflow and returns -1
+ * instead of the required size. Use _vscprintf to get the required size. */
+static int render_vsnprintf(char *buf, size_t size, const char *fmt, va_list ap) {
+    int ret;
+    va_list ap_copy;
+
+    if (size == 0) {
+        return _vscprintf(fmt, ap);
+    }
+    /* Copy va_list first since _vsnprintf consumes it. */
+    va_copy(ap_copy, ap);
+    ret = _vsnprintf(buf, size, fmt, ap_copy);
+    va_end(ap_copy);
+    if (size > 0) buf[size - 1] = '\0';
+    if (ret < 0) {
+        /* Buffer too small - get required size. */
+        ret = _vscprintf(fmt, ap);
+    }
+    return ret;
+}
+#define vsnprintf render_vsnprintf
+#endif
+
 #define INITIAL_BUF_SIZE 256
 
 int render_buf_init(render_buf_t *rb, size_t initial_capacity) {

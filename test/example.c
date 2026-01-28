@@ -1,7 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifndef _WIN32
+#ifdef _WIN32
+#define strcasecmp _stricmp
+#else
 #include <sys/select.h>
 #endif
 #include "linenoise.h"

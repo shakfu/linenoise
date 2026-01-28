@@ -41,6 +41,7 @@
 #define open _open
 #define close _close
 #define fdopen _fdopen
+#define strdup _strdup
 #ifndef S_IRUSR
 #define S_IRUSR _S_IREAD
 #endif

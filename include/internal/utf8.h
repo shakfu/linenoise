@@ -28,8 +28,13 @@ uint32_t utf8_decode_prev(const char *buf, size_t pos, size_t *cplen);
 /* Return the display width of a Unicode codepoint (0, 1, or 2 columns). */
 int utf8_codepoint_width(uint32_t cp);
 
+/* If 's' points at an ANSI CSI escape sequence (ESC '[' ... final byte),
+ * return its length in bytes, otherwise 0. 's[0]' must be ESC (0x1b). */
+size_t utf8_ansi_escape_len(const char *s, size_t len);
+
 /* Calculate the display width of a UTF-8 string of 'len' bytes.
- * Handles grapheme clusters (ZWJ sequences count as single width). */
+ * Handles grapheme clusters (ZWJ sequences count as single width) and
+ * treats ANSI CSI escape sequences (e.g. color codes) as zero-width. */
 size_t utf8_str_width(const char *s, size_t len);
 
 /* Return the display width of a single UTF-8 character at position 's'. */

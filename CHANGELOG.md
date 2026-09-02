@@ -4,6 +4,41 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+Ported from upstream [antirez/linenoise](https://github.com/antirez/linenoise)
+(shakfu/linenoise#1).
+
+### Added
+
+- Bracketed paste support: pasted input is recognized via `ESC[200~` /
+  `ESC[201~`, and multi-line or very long pastes are folded on screen as a
+  `[... N pasted lines ...]` placeholder while the edit buffer keeps the real
+  bytes. Cursor movement steps over a folded range in a single keypress, and
+  recalled history entries that contain newlines are folded again.
+- `utf8_ansi_escape_len()` in the UTF-8 module, used to skip ANSI CSI
+  sequences when measuring display width.
+- `--ansi-prompt` option in the example program, plus test-suite coverage for
+  paste folding, ANSI prompts and TAB with no completions.
+
+### Changed
+
+- History files encode embedded newlines as CR, so an entry that spans several
+  lines survives a save/load round trip. History loading is no longer limited
+  to `LINENOISE_MAX_LINE` bytes per entry.
+- The blocking API (`linenoise_read()`) now edits in a dynamically grown
+  buffer instead of a fixed 4 KB stack buffer, so large pastes fit.
+
+### Fixed
+
+- ANSI CSI escape sequences (for example color codes in the prompt) are treated
+  as zero-width when computing display widths, so a colored prompt no longer
+  offsets the cursor column.
+- TAB with no available completion is consumed instead of being inserted as a
+  literal tab character.
+- The test suite's VT100 emulator now honors `ESC[0K` and ignores private mode
+  sequences such as `ESC[?2004h`.
+
 ## [2.0.0] - 2026-01-28
 
 ### Breaking Changes

@@ -16,6 +16,7 @@ This version tries to be cross-platform and includes some additional features:
 * Word movement and deletion (Ctrl+Arrow, Alt+B/F/D)
 * Mouse support (click to position cursor)
 * Multiplexing mode with prompt hiding/restoring for asynchronous output
+* Bracketed paste support, with large or multi-line pastes folded on screen
 * Dynamic buffers for unlimited input length
 * Full UTF-8 support (multi-byte characters, emoji, grapheme clusters)
 * Custom memory allocator support
@@ -232,6 +233,8 @@ The test suite includes a VT100 terminal emulator that visually displays linenoi
 * Multi-line mode editing and navigation
 * History navigation
 * Word and line deletion (Ctrl-W, Ctrl-U)
+* Bracketed paste and paste folding
+* ANSI escape sequences in the prompt (zero-width)
 
 ## Key Bindings
 
@@ -259,6 +262,20 @@ The test suite includes a VT100 terminal emulator that visually displays linenoi
 | Ctrl+D | EOF on empty line |
 | Ctrl+L | Clear screen |
 | Enter | Accept line |
+
+## Pasting
+
+When the terminal supports bracketed paste, linenoise recognizes pasted input
+and keeps the real pasted bytes in the edit buffer, while showing multi-line or
+very long pastes folded as a `[... 3 pasted lines ...]` placeholder. Cursor
+movement steps over a folded range in one keypress, and editing inside it
+unfolds nothing: the string returned by `linenoise_read()` is always the real
+text that was pasted.
+
+Because a history entry may now contain embedded newlines, the history file
+stores them as CR characters and `linenoise_history_load()` converts them back,
+so the file stays newline separated. Recalled multi-line entries are folded
+again on screen while remaining fully editable.
 
 ## Tested Platforms
 

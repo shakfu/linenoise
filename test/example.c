@@ -31,6 +31,7 @@ int main(int argc, char **argv) {
     int async = 0;
 #endif
     int multiline = 0;
+    const char *prompt = "hello> ";
 
     /* Parse options, with --multiline we enable multi line editing. */
     while(argc > 1) {
@@ -46,11 +47,16 @@ int main(int argc, char **argv) {
         } else if (!strcmp(*argv,"--async")) {
             async = 1;
 #endif
+        } else if (!strcmp(*argv,"--ansi-prompt")) {
+            /* "red" in red, "green" in green, then "> " in default color.
+             * Visible width is 10 columns; the raw string contains ANSI
+             * CSI escape sequences that must be treated as zero-width. */
+            prompt = "\x1b[31mred\x1b[32mgreen\x1b[0m> ";
         } else {
 #ifdef _WIN32
-            fprintf(stderr, "Usage: %s [--multiline] [--keycodes]\n", prgname);
+            fprintf(stderr, "Usage: %s [--multiline] [--keycodes] [--ansi-prompt]\n", prgname);
 #else
-            fprintf(stderr, "Usage: %s [--multiline] [--keycodes] [--async]\n", prgname);
+            fprintf(stderr, "Usage: %s [--multiline] [--keycodes] [--async] [--ansi-prompt]\n", prgname);
 #endif
             exit(1);
         }
@@ -87,11 +93,11 @@ int main(int argc, char **argv) {
     while(1) {
 #ifdef _WIN32
         /* On Windows, only synchronous mode is supported. */
-        line = linenoise_read(ctx, "hello> ");
+        line = linenoise_read(ctx, prompt);
         if (line == NULL) break;
 #else
         if (!async) {
-            line = linenoise_read(ctx, "hello> ");
+            line = linenoise_read(ctx, prompt);
             if (line == NULL) break;
         } else {
             /* Asynchronous mode using the multiplexing API: wait for
@@ -99,7 +105,7 @@ int main(int argc, char **argv) {
              * using the select(2) timeout. */
             linenoise_state_t ls;
             char buf[1024];
-            linenoise_edit_start(ctx, &ls,-1,-1,buf,sizeof(buf),"hello> ");
+            linenoise_edit_start(ctx, &ls,-1,-1,buf,sizeof(buf),prompt);
             while(1) {
 		fd_set readfds;
 		struct timeval tv;

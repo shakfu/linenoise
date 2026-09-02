@@ -184,7 +184,14 @@ int history_save(const history_t *h, const char *filename) {
     }
 
     for (int j = 0; j < h->len; j++) {
-        fprintf(fp, "%s\n", h->entries[j]);
+        /* Keep the file newline separated: embedded newlines in an entry are
+         * stored as CR and converted back by history_load(). */
+        const char *p = h->entries[j];
+        while (*p) {
+            fputc(*p == '\n' ? '\r' : *p, fp);
+            p++;
+        }
+        fputc('\n', fp);
     }
 
     fclose(fp);
@@ -209,10 +216,13 @@ int history_load(history_t *h, const char *filename, size_t max_line_len) {
     }
 
     while (fgets(buf, (int)max_line_len, fp) != NULL) {
-        /* Strip trailing newline characters. */
-        p = strchr(buf, '\r');
-        if (p == NULL) p = strchr(buf, '\n');
+        /* Strip the trailing newline, then rebuild the embedded newlines
+         * that were saved as CR. */
+        p = strchr(buf, '\n');
         if (p != NULL) *p = '\0';
+        for (p = buf; *p; p++) {
+            if (*p == '\r') *p = '\n';
+        }
         history_add(h, buf);
     }
 

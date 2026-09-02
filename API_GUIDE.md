@@ -570,10 +570,31 @@ Pass `NULL` for any function to use the default implementation.
 ## Constants
 
 ```c
-LINENOISE_MAX_LINE              // 4096 - Maximum line length (fixed buffers)
+LINENOISE_MAX_LINE              // 4096 - Initial line buffer size
 LINENOISE_DEFAULT_HISTORY_MAX_LEN  // 100 - Default history size
 LINENOISE_SEQ_SIZE              // 64 - Internal escape sequence buffer
+LINENOISE_MAX_FOLDS             // 16 - Max folded paste ranges per line
 ```
+
+---
+
+## Bracketed Paste
+
+When the terminal supports it, linenoise enables bracketed paste mode while
+editing. Pasted text is kept verbatim in the edit buffer (and in the string
+returned by `linenoise_read()` / `linenoise_edit_feed()`), but a paste that
+contains newlines or is at least 200 bytes long is rendered as a folded
+placeholder such as `[... 3 pasted lines ...]`. Cursor movement steps over a
+folded range in one keypress; editing across a fold simply drops the fold and
+shows the real text.
+
+`linenoise_read()` grows its buffer as needed, so pastes are not limited to
+`LINENOISE_MAX_LINE`. With `linenoise_edit_start()` the caller's fixed buffer
+still bounds the paste; use `linenoise_edit_start_dynamic()` for growth.
+
+History entries may therefore contain newlines: `linenoise_history_save()`
+stores them as CR characters and `linenoise_history_load()` converts them
+back, keeping the history file newline separated.
 
 ---
 

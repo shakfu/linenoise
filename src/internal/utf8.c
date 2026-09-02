@@ -273,6 +273,22 @@ int utf8_codepoint_width(uint32_t cp) {
     return 1; /* Default: single width */
 }
 
+/* If s[] points at an ANSI CSI escape sequence (e.g. a color change like
+ * ESC [ 1 ; 32 m), return its length in bytes. Otherwise return 0.
+ *
+ * The caller must have already verified that s[0] == ESC (0x1b). The
+ * sequence layout follows ECMA-48: ESC '[', parameter bytes (0x30-0x3f),
+ * intermediate bytes (0x20-0x2f), and a final byte (0x40-0x7e). */
+size_t utf8_ansi_escape_len(const char *s, size_t len) {
+    size_t i;
+    if (len < 2 || s[1] != '[') return 0;
+    i = 2;
+    while (i < len && (unsigned char)s[i] >= 0x30 && (unsigned char)s[i] <= 0x3f) i++;
+    while (i < len && (unsigned char)s[i] >= 0x20 && (unsigned char)s[i] <= 0x2f) i++;
+    if (i >= len || (unsigned char)s[i] < 0x40 || (unsigned char)s[i] > 0x7e) return 0;
+    return i + 1;
+}
+
 /* Calculate the display width of a UTF-8 string of 'len' bytes.
  * This is used for cursor positioning in the terminal.
  * Handles grapheme clusters: characters joined by ZWJ contribute 0 width
@@ -285,6 +301,18 @@ size_t utf8_str_width(const char *s, size_t len) {
     while (i < len) {
         size_t clen;
         uint32_t cp = utf8_decode(s + i, &clen);
+
+        /* Skip ANSI CSI escape sequences entirely: they produce no
+         * glyph, so they must not contribute to the display width.
+         * Checked before the ZWJ state so a stray ZWJ immediately
+         * followed by ESC cannot swallow the ESC byte. */
+        if (cp == 0x1b) {
+            size_t skip = utf8_ansi_escape_len(s + i, len - i);
+            if (skip > 0) {
+                i += skip;
+                continue;
+            }
+        }
 
         if (after_zwj) {
             /* Character after ZWJ: don't add width, it's joined.

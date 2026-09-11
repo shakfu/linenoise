@@ -31,7 +31,7 @@ Version 2.0 is a major rewrite with a new context-based API:
 
 * **Breaking change**: All functions now use snake_case naming and require a context
 * Multiple independent linenoise instances can coexist
-* Thread-safe when using separate contexts per thread
+* Separate contexts may be used from separate threads
 * See [CHANGELOG.md](CHANGELOG.md) for migration guide
 
 ## Quick Start

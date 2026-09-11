@@ -84,7 +84,7 @@ Prioritized task list derived from architectural review. Items ordered by depend
   - Removed all legacy global API functions (linenoise(), linenoiseHistoryAdd(), etc.)
   - All public API now uses snake_case naming convention
   - Header version updated to VERSION 2.0
-  - Context API temporarily swaps globals for internal calls (transitional)
+  - Editing code reads the context through `linenoise_state_t.ctx`; no per-context globals remain
 
 ---
 

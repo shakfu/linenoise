@@ -120,7 +120,8 @@ typedef void (linenoise_free_hints_cb_t)(void *hint);
 typedef void (linenoise_highlight_cb_t)(const char *buf, char *colors, size_t len);
 
 /* Opaque context structure. Each context has independent history, callbacks,
- * and settings. Thread-safe when using separate contexts per thread. */
+ * and settings, and at most one active editing session. Separate contexts may
+ * be used from separate threads. */
 typedef struct linenoise_context linenoise_context_t;
 
 /* Editing state for non-blocking API. */
@@ -144,6 +145,10 @@ typedef struct linenoise_state {
     int fold_count;     /* Number of folded (display only) ranges. */
     size_t fold_start[LINENOISE_MAX_FOLDS]; /* Folded range start offsets. */
     size_t fold_end[LINENOISE_MAX_FOLDS];   /* Folded range end offsets. */
+    linenoise_context_t *ctx;              /* Context that owns this session. */
+    struct linenoise_undo_entry *undo_stack; /* Undo snapshots, freed on stop. */
+    int undo_len;
+    int undo_idx;
 } linenoise_state_t;
 
 /* ===== Context Management ===== */
@@ -167,6 +172,9 @@ char *linenoise_read(linenoise_context_t *ctx, const char *prompt);
 
 /* ===== Non-blocking API ===== */
 
+/* A context allows one active session: a second linenoise_edit_start() (or
+ * linenoise_read()) on the same context before linenoise_edit_stop() fails
+ * with LINENOISE_ERR_INVALID. */
 int linenoise_edit_start(linenoise_context_t *ctx, linenoise_state_t *state,
                          int stdin_fd, int stdout_fd,
                          char *buf, size_t buflen, const char *prompt);

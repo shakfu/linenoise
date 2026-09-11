@@ -22,10 +22,11 @@ linenoise-example: $(BUILD_DIR)/Makefile
 linenoise-test: $(BUILD_DIR)/Makefile
 	$(CMAKE) --build $(BUILD_DIR) --target linenoise-test
 
-# Run tests (requires both test binary and example binary)
+# Run tests (requires the test binaries and the example binary)
 test: $(BUILD_DIR)/Makefile
 	$(CMAKE) --build $(BUILD_DIR) --target linenoise-example
 	$(CMAKE) --build $(BUILD_DIR) --target linenoise-test
+	$(CMAKE) --build $(BUILD_DIR) --target test-context
 	cd $(BUILD_DIR) && ctest --output-on-failure
 
 # Clean build artifacts

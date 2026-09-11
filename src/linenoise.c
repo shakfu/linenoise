@@ -216,9 +216,15 @@ static char *unsupported_term[] = {"dumb","cons25","emacs",NULL};
 
 /* ======================= Error Handling ==================================== */
 
-/* Thread-local error code (using static for single-threaded simplicity).
- * For true thread-safety, this should use thread-local storage. */
-static linenoise_error_t last_error = LINENOISE_OK;
+/* Error code of the last failed call on the calling thread. */
+#if defined(_MSC_VER)
+#define LN_THREAD_LOCAL __declspec(thread)
+#elif defined(__GNUC__) || defined(__clang__)
+#define LN_THREAD_LOCAL __thread
+#else
+#define LN_THREAD_LOCAL
+#endif
+static LN_THREAD_LOCAL linenoise_error_t last_error = LINENOISE_OK;
 
 static void set_error(linenoise_error_t err) {
     last_error = err;
@@ -291,23 +297,23 @@ static char *ln_strdup(const char *s) {
 static char *linenoise_no_tty(void);
 static void refresh_line_with_completion(linenoise_state_t *ls, linenoise_completions_t *lc, int flags);
 static void refresh_line_with_flags(linenoise_state_t *l, int flags);
-static int history_add(const char *line);
+static int history_push(linenoise_context_t *ctx, const char *line);
+static void history_drop_placeholder(linenoise_state_t *l);
 static void fold_clear(linenoise_state_t *l);
 
 /* ======================= Context Structure ================================= */
 
 /* The linenoise_context structure encapsulates all state for one linenoise
- * instance. This enables thread-safe usage and multiple independent instances.
- * The old global API uses a default context for backward compatibility. */
+ * instance. Editing code reaches it through linenoise_state_t.ctx. */
 struct linenoise_context {
     /* Terminal state */
-#ifdef _WIN32
-    DWORD orig_console_mode;
-#else
+#ifndef _WIN32
     struct termios orig_termios;
 #endif
     int rawmode;
-    int atexit_registered;
+    int raw_fd;         /* fd put in raw mode, restored at exit */
+    linenoise_state_t *session; /* Active editing session, or NULL. */
+    int placeholder;    /* history[history_len-1] is the session's own line */
 
     /* Configuration */
     int maskmode;
@@ -326,24 +332,10 @@ struct linenoise_context {
     linenoise_highlight_cb_t *highlight_callback;
 };
 
-/* Internal global variables used by the editing functions. */
-static linenoise_completion_cb_t *completion_callback = NULL;
-static linenoise_hints_cb_t *hints_callback = NULL;
-static linenoise_free_hints_cb_t *free_hints_callback = NULL;
-static linenoise_highlight_cb_t *highlight_callback = NULL;
-#ifdef _WIN32
-static DWORD orig_console_mode; /* In order to restore at exit.*/
-#else
-static struct termios orig_termios; /* In order to restore at exit.*/
-#endif
-static int maskmode = 0; /* Show "***" instead of input. For passwords. */
-static int rawmode = 0; /* For atexit() function to check if restore is needed*/
-static int mlmode = 0;  /* Multi line mode. Default is single line. */
-static int mousemode = 0; /* Mouse tracking mode. */
-static int atexit_registered = 0; /* Register atexit just 1 time. */
-static int history_max_len = LINENOISE_DEFAULT_HISTORY_MAX_LEN;
-static int history_len = 0;
-static char **history = NULL;
+/* Process-wide terminal restore at exit: covers the context that most
+ * recently entered raw mode. */
+static int atexit_registered = 0;
+static linenoise_context_t *raw_ctx = NULL;
 
 /* UTF-8 support is now provided by src/utf8.c via internal/utf8.h.
  * The compatibility macros above map old function names to the new module. */
@@ -430,14 +422,14 @@ static HANDLE h_console_output = INVALID_HANDLE_VALUE;
 static DWORD orig_input_mode = 0;
 static DWORD orig_output_mode = 0;
 
-/* Raw mode for Windows using VT100 emulation (Windows 10+). */
-static int enable_raw_mode(int fd) {
+/* Raw mode for Windows using VT100 emulation (Windows 10+). The console is
+ * per process, so its original modes are kept in globals. */
+static int enable_raw_mode(linenoise_context_t *ctx, int fd) {
     DWORD input_mode, output_mode;
-    (void)fd;  /* Unused on Windows. */
 
     /* Test mode: when LINENOISE_ASSUME_TTY is set, skip terminal setup. */
     if (getenv("LINENOISE_ASSUME_TTY")) {
-        rawmode = 1;
+        ctx->rawmode = 1;
         return 0;
     }
 
@@ -481,23 +473,24 @@ static int enable_raw_mode(int fd) {
         return -1;
     }
 
-    rawmode = 1;
+    ctx->rawmode = 1;
+    ctx->raw_fd = fd;
+    raw_ctx = ctx;
     return 0;
 }
 
-static void disable_raw_mode(int fd) {
-    (void)fd;
-
+static void disable_raw_mode(linenoise_context_t *ctx) {
     if (getenv("LINENOISE_ASSUME_TTY")) {
-        rawmode = 0;
+        ctx->rawmode = 0;
         return;
     }
 
-    if (rawmode) {
+    if (ctx->rawmode) {
         SetConsoleMode(h_console_input, orig_input_mode);
         SetConsoleMode(h_console_output, orig_output_mode);
-        rawmode = 0;
+        ctx->rawmode = 0;
     }
+    if (raw_ctx == ctx) raw_ctx = NULL;
 }
 
 /* Read a single byte with a timeout on Windows. */
@@ -527,13 +520,13 @@ static int read_byte_with_timeout(int fd, char *c, int timeout_ms) {
 #else /* POSIX */
 
 /* Raw mode: 1960 magic shit. */
-static int enable_raw_mode(int fd) {
+static int enable_raw_mode(linenoise_context_t *ctx, int fd) {
     struct termios raw;
 
     /* Test mode: when LINENOISE_ASSUME_TTY is set, skip terminal setup.
      * This allows testing via pipes without a real terminal. */
     if (getenv("LINENOISE_ASSUME_TTY")) {
-        rawmode = 1;
+        ctx->rawmode = 1;
         return 0;
     }
 
@@ -542,9 +535,9 @@ static int enable_raw_mode(int fd) {
         atexit(linenoise_at_exit);
         atexit_registered = 1;
     }
-    if (tcgetattr(fd,&orig_termios) == -1) goto fatal;
+    if (tcgetattr(fd,&ctx->orig_termios) == -1) goto fatal;
 
-    raw = orig_termios;  /* modify the original mode */
+    raw = ctx->orig_termios;  /* modify the original mode */
     /* input modes: no break, no CR to NL, no parity check, no strip char,
      * no start/stop output control. */
     raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
@@ -561,7 +554,9 @@ static int enable_raw_mode(int fd) {
 
     /* put terminal in raw mode after flushing */
     if (tcsetattr(fd,TCSAFLUSH,&raw) < 0) goto fatal;
-    rawmode = 1;
+    ctx->rawmode = 1;
+    ctx->raw_fd = fd;
+    raw_ctx = ctx;
     return 0;
 
 fatal:
@@ -569,15 +564,16 @@ fatal:
     return -1;
 }
 
-static void disable_raw_mode(int fd) {
+static void disable_raw_mode(linenoise_context_t *ctx) {
     /* Test mode: nothing to restore. */
     if (getenv("LINENOISE_ASSUME_TTY")) {
-        rawmode = 0;
+        ctx->rawmode = 0;
         return;
     }
     /* Don't even check the return value as it's too late. */
-    if (rawmode && tcsetattr(fd,TCSAFLUSH,&orig_termios) != -1)
-        rawmode = 0;
+    if (ctx->rawmode && tcsetattr(ctx->raw_fd,TCSAFLUSH,&ctx->orig_termios) != -1)
+        ctx->rawmode = 0;
+    if (raw_ctx == ctx) raw_ctx = NULL;
 }
 
 /* Read a single byte with a timeout. Returns 1 on success, 0 on timeout,
@@ -764,7 +760,7 @@ static void refresh_line_with_completion(linenoise_state_t *ls, linenoise_comple
     /* Obtain the table of completions if the caller didn't provide one. */
     linenoise_completions_t ctable = { 0, NULL };
     if (lc == NULL) {
-        completion_callback(ls->buf,&ctable);
+        ls->ctx->completion_callback(ls->buf,&ctable);
         lc = &ctable;
     }
 
@@ -806,7 +802,7 @@ static int complete_line(linenoise_state_t *ls, int keypressed) {
     int nwritten;
     char c = keypressed;
 
-    completion_callback(ls->buf,&lc);
+    ls->ctx->completion_callback(ls->buf,&lc);
     if (lc.len == 0) {
         linenoise_beep();
         ls->in_completion = 0;
@@ -963,7 +959,7 @@ static void fold_set_rendered_text(struct fold *f, const char *buf) {
  * contains newlines. */
 static int build_history_fold(linenoise_state_t *l, struct fold *f) {
     f->start = f->end = f->displaylen = 0;
-    if (l->len == 0 || maskmode) return 0;
+    if (l->len == 0 || l->ctx->maskmode) return 0;
     if (!should_fold_text(l->buf,l->len)) return 0;
 
     f->start = 0;
@@ -1011,7 +1007,7 @@ static int get_render_folds(linenoise_state_t *l, struct folds *fs) {
     int j;
 
     fs->count = 0;
-    if (l->len == 0 || maskmode) return 0;
+    if (l->len == 0 || l->ctx->maskmode) return 0;
 
     for (j = 0; j < l->fold_count; j++) {
         struct fold *f;
@@ -1208,7 +1204,7 @@ static void adjust_folds_after_delete(linenoise_state_t *l, size_t pos, size_t l
 }
 
 /* Helper to append text with syntax highlighting.
- * If highlight_callback is set, calls it to get colors for each byte,
+ * If 'highlight' is set, calls it to get colors for each byte,
  * then outputs the text with appropriate ANSI color codes.
  *
  * Color values use 256-color palette:
@@ -1223,13 +1219,14 @@ static void adjust_folds_after_delete(linenoise_state_t *l, size_t pos, size_t l
  * For colors 16-255, we use the 256-color escape sequence:
  *   \x1b[38;5;Xm where X is the color number
  */
-static void ab_append_highlighted(struct abuf *ab, const char *buf, size_t len) {
+static void ab_append_highlighted(struct abuf *ab, linenoise_highlight_cb_t *highlight,
+                                  const char *buf, size_t len) {
     char seq[32];
     char *colors = NULL;
     size_t i;
     int cur_color = 0;
 
-    if (!highlight_callback || len == 0) {
+    if (!highlight || len == 0) {
         /* Output text, clearing each line after newlines for multiline support. */
         size_t start = 0;
         for (i = 0; i < len; i++) {
@@ -1254,7 +1251,7 @@ static void ab_append_highlighted(struct abuf *ab, const char *buf, size_t len) 
     memset(colors, 0, len);
 
     /* Call the highlight callback. */
-    highlight_callback(buf, colors, len);
+    highlight(buf, colors, len);
 
     /* Output text with color changes. */
     for (i = 0; i < len; i++) {
@@ -1300,9 +1297,9 @@ static void ab_append_highlighted(struct abuf *ab, const char *buf, size_t len) 
  * to the right of the prompt. Now uses display widths for proper UTF-8. */
 void refresh_show_hints(struct abuf *ab, linenoise_state_t *l, int pwidth, size_t bufwidth) {
     char seq[LINENOISE_SEQ_SIZE];
-    if (hints_callback && pwidth + bufwidth < l->cols) {
+    if (l->ctx->hints_callback && pwidth + bufwidth < l->cols) {
         int color = -1, bold = 0;
-        char *hint = hints_callback(l->buf,&color,&bold);
+        char *hint = l->ctx->hints_callback(l->buf,&color,&bold);
         if (hint) {
             size_t hintlen = strlen(hint);
             size_t hintwidth = utf8StrWidth(hint, hintlen);
@@ -1329,7 +1326,7 @@ void refresh_show_hints(struct abuf *ab, linenoise_state_t *l, int pwidth, size_
             if (color != -1 || bold != 0)
                 ab_append(ab,"\033[0m",4);
             /* Call the function to free the hint returned. */
-            if (free_hints_callback) free_hints_callback(hint);
+            if (l->ctx->free_hints_callback) l->ctx->free_hints_callback(hint);
         }
     }
 }
@@ -1452,7 +1449,7 @@ static void refresh_single_line(linenoise_state_t *l, int flags) {
     if (flags & REFRESH_WRITE) {
         /* Write the prompt and the current buffer content */
         ab_append(&ab,l->prompt,l->plen);
-        if (maskmode == 1) {
+        if (l->ctx->maskmode == 1) {
             /* In mask mode, we output one '*' per UTF-8 character, not byte */
             size_t i = 0;
             while (i < len) {
@@ -1460,7 +1457,7 @@ static void refresh_single_line(linenoise_state_t *l, int flags) {
                 i += utf8NextCharLen(buf, i, len);
             }
         } else {
-            ab_append_highlighted(&ab,buf,len);
+            ab_append_highlighted(&ab,l->ctx->highlight_callback,buf,len);
         }
         /* Show hints if any. */
         refresh_show_hints(&ab,l,pwidth,fullwidth);
@@ -1555,7 +1552,7 @@ static void refresh_multi_line(linenoise_state_t *l, int flags) {
     if (flags & REFRESH_WRITE) {
         /* Write the prompt and the current buffer content */
         ab_append(&ab,l->prompt,l->plen);
-        if (maskmode == 1) {
+        if (l->ctx->maskmode == 1) {
             /* In mask mode, output one '*' per UTF-8 character, not byte */
             size_t i = 0;
             while (i < render_len) {
@@ -1563,7 +1560,7 @@ static void refresh_multi_line(linenoise_state_t *l, int flags) {
                 i += utf8NextCharLen(render, i, render_len);
             }
         } else {
-            ab_append_highlighted(&ab,render,render_len);
+            ab_append_highlighted(&ab,l->ctx->highlight_callback,render,render_len);
         }
 
         /* Show hints if any. */
@@ -1615,7 +1612,7 @@ static void refresh_multi_line(linenoise_state_t *l, int flags) {
 /* Calls the two low level functions refresh_single_line() or
  * refresh_multi_line() according to the selected mode. */
 static void refresh_line_with_flags(linenoise_state_t *l, int flags) {
-    if (mlmode)
+    if (l->ctx->mlmode)
         refresh_multi_line(l,flags);
     else
         refresh_single_line(l,flags);
@@ -1628,7 +1625,7 @@ static void refresh_line(linenoise_state_t *l) {
 
 /* Hide the current line, when using the multiplexing API. */
 void linenoise_hide(linenoise_state_t *l) {
-    if (mlmode)
+    if (l->ctx->mlmode)
         refresh_multi_line(l,REFRESH_CLEAN);
     else
         refresh_single_line(l,REFRESH_CLEAN);
@@ -1708,13 +1705,13 @@ int linenoise_edit_insert(linenoise_state_t *l, const char *c, size_t clen) {
 
         /* Append at end of line. */
         if (edit_insert_no_refresh(l,c,clen) == -1) return 0;
-        if (!needs_refresh && !mlmode && !hints_callback && !highlight_callback &&
-            (maskmode || l->fold_count == 0))
+        if (!needs_refresh && !l->ctx->mlmode && !l->ctx->hints_callback && !l->ctx->highlight_callback &&
+            (l->ctx->maskmode || l->fold_count == 0))
         {
             if (utf8StrWidth(l->prompt,l->plen)+utf8StrWidth(l->buf,l->len) < l->cols) {
                 /* Avoid a full update of the line in the trivial case:
                  * single-width char, no hints, no highlighting, fits in one line. */
-                if (maskmode == 1) {
+                if (l->ctx->maskmode == 1) {
                     if (write(l->ofd,"*",1) == -1) return -1;
                 } else {
                     if (write(l->ofd,c,clen) == -1) return -1;
@@ -1794,27 +1791,28 @@ static void linenoise_edit_move_to_column(linenoise_state_t *l, int col) {
 #define LINENOISE_HISTORY_NEXT 0
 #define LINENOISE_HISTORY_PREV 1
 void linenoise_edit_history_next(linenoise_state_t *l, int dir) {
-    if (history_len > 1) {
+    /* Browsing stores edits in the session's own line, so it needs one. */
+    if (l->ctx->placeholder && l->ctx->history_len > 1) {
         const char *src;
         size_t len;
         struct fold f;
 
         /* Update the current history entry before to
          * overwrite it with the next one. */
-        ln_free(history[history_len - 1 - l->history_index]);
-        history[history_len - 1 - l->history_index] = ln_strdup(l->buf);
+        ln_free(l->ctx->history[l->ctx->history_len - 1 - l->history_index]);
+        l->ctx->history[l->ctx->history_len - 1 - l->history_index] = ln_strdup(l->buf);
         /* Show the new entry */
         l->history_index += (dir == LINENOISE_HISTORY_PREV) ? 1 : -1;
         if (l->history_index < 0) {
             l->history_index = 0;
             return;
-        } else if (l->history_index >= history_len) {
-            l->history_index = history_len-1;
+        } else if (l->history_index >= l->ctx->history_len) {
+            l->history_index = l->ctx->history_len-1;
             return;
         }
         /* Copy the selected history entry into the edit buffer. With a
          * fixed-size buffer, truncate the entry if it does not fit. */
-        src = history[history_len - 1 - l->history_index];
+        src = l->ctx->history[l->ctx->history_len - 1 - l->history_index];
         len = strlen(src);
         if (edit_grow(l,len) == -1 && len > l->buflen) len = l->buflen;
         memcpy(l->buf,src,len);
@@ -1925,73 +1923,66 @@ void linenoise_edit_delete_word_right(linenoise_state_t *l) {
 #define LINENOISE_UNDO_MAX 100  /* Maximum undo stack size */
 
 /* Undo entry structure. */
-typedef struct undo_entry {
+typedef struct linenoise_undo_entry {
     char *buf;          /* Buffer content snapshot */
     size_t len;         /* Buffer length */
     size_t pos;         /* Cursor position */
 } undo_entry_t;
 
-/* Undo state - stored per editing state (simplified: using static for now). */
-static undo_entry_t *undo_stack = NULL;
-static int undo_stack_len = 0;
-static int undo_stack_idx = 0;  /* Current position in stack */
-static int undo_stack_cap = 0;
-
-/* Save current state to undo stack. */
+/* Save current state to the session's undo stack. */
 static void undo_save(linenoise_state_t *l) {
     undo_entry_t *entry;
 
     /* Initialize stack if needed. */
-    if (undo_stack == NULL) {
-        undo_stack_cap = LINENOISE_UNDO_MAX;
-        undo_stack = ln_malloc(sizeof(undo_entry_t) * undo_stack_cap);
-        if (undo_stack == NULL) return;
-        memset(undo_stack, 0, sizeof(undo_entry_t) * undo_stack_cap);
+    if (l->undo_stack == NULL) {
+        l->undo_stack = ln_malloc(sizeof(undo_entry_t) * LINENOISE_UNDO_MAX);
+        if (l->undo_stack == NULL) return;
+        memset(l->undo_stack, 0, sizeof(undo_entry_t) * LINENOISE_UNDO_MAX);
     }
 
     /* Discard any redo entries after current position. */
-    while (undo_stack_len > undo_stack_idx) {
-        undo_stack_len--;
-        ln_free(undo_stack[undo_stack_len].buf);
-        undo_stack[undo_stack_len].buf = NULL;
+    while (l->undo_len > l->undo_idx) {
+        l->undo_len--;
+        ln_free(l->undo_stack[l->undo_len].buf);
+        l->undo_stack[l->undo_len].buf = NULL;
     }
 
     /* If stack is full, remove oldest entry. */
-    if (undo_stack_len >= undo_stack_cap) {
-        ln_free(undo_stack[0].buf);
-        memmove(undo_stack, undo_stack + 1, sizeof(undo_entry_t) * (undo_stack_cap - 1));
-        undo_stack_len--;
-        undo_stack_idx--;
+    if (l->undo_len >= LINENOISE_UNDO_MAX) {
+        ln_free(l->undo_stack[0].buf);
+        memmove(l->undo_stack, l->undo_stack + 1, sizeof(undo_entry_t) * (LINENOISE_UNDO_MAX - 1));
+        l->undo_len--;
+        l->undo_idx--;
     }
 
     /* Save current state. */
-    entry = &undo_stack[undo_stack_len];
+    entry = &l->undo_stack[l->undo_len];
     entry->buf = ln_malloc(l->len + 1);
     if (entry->buf == NULL) return;
     memcpy(entry->buf, l->buf, l->len + 1);
     entry->len = l->len;
     entry->pos = l->pos;
-    undo_stack_len++;
-    undo_stack_idx = undo_stack_len;
+    l->undo_len++;
+    l->undo_idx = l->undo_len;
 }
 
 /* Undo: restore previous state. */
 void linenoise_edit_undo(linenoise_state_t *l) {
     undo_entry_t *entry;
 
-    if (undo_stack == NULL || undo_stack_idx <= 0) {
+    if (l->undo_stack == NULL || l->undo_idx <= 0) {
         linenoise_beep();
         return;
     }
 
     /* Save current state for redo if we're at the top. */
-    if (undo_stack_idx == undo_stack_len) {
+    if (l->undo_idx == l->undo_len) {
         undo_save(l);
-        undo_stack_idx--;  /* Move back one more since undo_save incremented */
+        l->undo_idx--;  /* Move back one more since undo_save incremented */
     }
 
-    undo_stack_idx--;
-    entry = &undo_stack[undo_stack_idx];
+    l->undo_idx--;
+    entry = &l->undo_stack[l->undo_idx];
 
     /* Restore state. */
     if (entry->len <= l->buflen) {
@@ -2007,13 +1998,13 @@ void linenoise_edit_undo(linenoise_state_t *l) {
 void linenoise_edit_redo(linenoise_state_t *l) {
     undo_entry_t *entry;
 
-    if (undo_stack == NULL || undo_stack_idx >= undo_stack_len - 1) {
+    if (l->undo_stack == NULL || l->undo_idx >= l->undo_len - 1) {
         linenoise_beep();
         return;
     }
 
-    undo_stack_idx++;
-    entry = &undo_stack[undo_stack_idx];
+    l->undo_idx++;
+    entry = &l->undo_stack[l->undo_idx];
 
     /* Restore state. */
     if (entry->len <= l->buflen) {
@@ -2025,43 +2016,34 @@ void linenoise_edit_redo(linenoise_state_t *l) {
     }
 }
 
-/* Clear undo stack (call when starting new edit session). */
-static void undo_clear(void) {
-    if (undo_stack != NULL) {
-        for (int i = 0; i < undo_stack_len; i++) {
-            ln_free(undo_stack[i].buf);
+/* Free the session's undo stack. */
+static void undo_free(linenoise_state_t *l) {
+    if (l->undo_stack != NULL) {
+        for (int i = 0; i < l->undo_len; i++) {
+            ln_free(l->undo_stack[i].buf);
         }
-        ln_free(undo_stack);
-        undo_stack = NULL;
+        ln_free(l->undo_stack);
+        l->undo_stack = NULL;
     }
-    undo_stack_len = 0;
-    undo_stack_idx = 0;
-    undo_stack_cap = 0;
+    l->undo_len = 0;
+    l->undo_idx = 0;
 }
 
-/* Saved state for non-blocking API context swapping. */
-static struct {
-    int active;
-    int maskmode;
-    int mlmode;
-    int mousemode;
-    linenoise_completion_cb_t *completion_callback;
-    linenoise_hints_cb_t *hints_callback;
-    linenoise_free_hints_cb_t *free_hints_callback;
-    linenoise_highlight_cb_t *highlight_callback;
-    int history_len;
-    int history_max_len;
-    char **history;
-    linenoise_context_t *ctx;  /* Remember the context to update history */
-} edit_saved_state = {0};
+static void edit_stop(linenoise_state_t *l);
 
-/* Internal: Start editing (operates on global state). */
-static int edit_start(linenoise_state_t *l, int stdin_fd, int stdout_fd, char *buf, size_t buflen, const char *prompt) {
-    /* Clear undo stack for new edit session. */
-    undo_clear();
+/* Internal: Start a session of 'ctx' on the state 'l'. */
+static int edit_start(linenoise_context_t *ctx, linenoise_state_t *l, int stdin_fd, int stdout_fd, char *buf, size_t buflen, const char *prompt) {
+    if (ctx->session != NULL) {
+        set_error(LINENOISE_ERR_INVALID);
+        return -1;
+    }
 
     /* Populate the linenoise state that we pass to functions implementing
      * specific editing functionalities. */
+    l->ctx = ctx;
+    l->undo_stack = NULL;
+    l->undo_len = 0;
+    l->undo_idx = 0;
     l->in_completion = 0;
     l->ifd = stdin_fd != -1 ? stdin_fd : STDIN_FILENO;
     l->ofd = stdout_fd != -1 ? stdout_fd : STDOUT_FILENO;
@@ -2075,10 +2057,11 @@ static int edit_start(linenoise_state_t *l, int stdin_fd, int stdout_fd, char *b
     fold_clear(l);
 
     /* Enter raw mode. */
-    if (enable_raw_mode(l->ifd) == -1) return -1;
+    if (enable_raw_mode(ctx, l->ifd) == -1) return -1;
+    ctx->session = l;
 
     /* Enable mouse tracking if requested. */
-    if (mousemode) {
+    if (ctx->mousemode) {
         enable_mouse_tracking(l->ofd);
     }
 
@@ -2102,9 +2085,17 @@ static int edit_start(linenoise_state_t *l, int stdin_fd, int stdout_fd, char *b
 
     /* The latest history entry is always our current buffer, that
      * initially is just an empty string. */
-    history_add("");
+    if (history_push(ctx, "") == 0) {
+        set_error(LINENOISE_ERR_MEMORY);
+        edit_stop(l);
+        return -1;
+    }
+    ctx->placeholder = 1;
 
-    if (write(l->ofd,prompt,l->plen) == -1) return -1;
+    if (write(l->ofd,prompt,l->plen) == -1) {
+        edit_stop(l);
+        return -1;
+    }
     return 0;
 }
 
@@ -2116,35 +2107,11 @@ static int edit_start(linenoise_state_t *l, int stdin_fd, int stdout_fd, char *b
 int linenoise_edit_start(linenoise_context_t *ctx, linenoise_state_t *l,
                          int stdin_fd, int stdout_fd,
                          char *buf, size_t buflen, const char *prompt) {
-    if (!ctx) return -1;
-
-    /* Save current global state. */
-    edit_saved_state.active = 1;
-    edit_saved_state.maskmode = maskmode;
-    edit_saved_state.mlmode = mlmode;
-    edit_saved_state.mousemode = mousemode;
-    edit_saved_state.completion_callback = completion_callback;
-    edit_saved_state.hints_callback = hints_callback;
-    edit_saved_state.free_hints_callback = free_hints_callback;
-    edit_saved_state.highlight_callback = highlight_callback;
-    edit_saved_state.history_len = history_len;
-    edit_saved_state.history_max_len = history_max_len;
-    edit_saved_state.history = history;
-    edit_saved_state.ctx = ctx;
-
-    /* Set global state from context. */
-    maskmode = ctx->maskmode;
-    mlmode = ctx->mlmode;
-    mousemode = ctx->mousemode;
-    completion_callback = ctx->completion_callback;
-    hints_callback = ctx->hints_callback;
-    free_hints_callback = ctx->free_hints_callback;
-    highlight_callback = ctx->highlight_callback;
-    history_len = ctx->history_len;
-    history_max_len = ctx->history_max_len;
-    history = ctx->history;
-
-    return edit_start(l, stdin_fd, stdout_fd, buf, buflen, prompt);
+    if (!ctx) {
+        set_error(LINENOISE_ERR_INVALID);
+        return -1;
+    }
+    return edit_start(ctx, l, stdin_fd, stdout_fd, buf, buflen, prompt);
 }
 
 /* Start editing with a dynamically-sized buffer.
@@ -2301,7 +2268,7 @@ static void edit_paste(linenoise_state_t *l) {
         len = w;
     }
 
-    if (!maskmode && should_fold_text(buf,len)) {
+    if (!l->ctx->maskmode && should_fold_text(buf,len)) {
         size_t start = l->pos;
         if (edit_insert_no_refresh(l,buf,len) == -1) {
             ln_free(buf);
@@ -2374,7 +2341,7 @@ char *linenoise_edit_feed(linenoise_state_t *l) {
     /* Autocomplete when the callback is set. complete_line() returns the
      * character to be handled next, or zero when the key was consumed to
      * navigate the completions (or because there was nothing to complete). */
-    if ((l->in_completion || c == 9) && completion_callback != NULL) {
+    if ((l->in_completion || c == 9) && l->ctx->completion_callback != NULL) {
         int retval = complete_line(l,c);
         /* Read next character when 0 */
         if (retval == 0) return linenoise_edit_more;
@@ -2383,19 +2350,19 @@ char *linenoise_edit_feed(linenoise_state_t *l) {
 
     switch(c) {
     case ENTER:    /* enter */
-        history_len--;
-        ln_free(history[history_len]);
-        if (mlmode) linenoise_edit_move_end(l);
-        if (hints_callback) {
+        history_drop_placeholder(l);
+        if (l->ctx->mlmode) linenoise_edit_move_end(l);
+        if (l->ctx->hints_callback) {
             /* Force a refresh without hints to leave the previous
              * line as the user typed it after a newline. */
-            linenoise_hints_cb_t *hc = hints_callback;
-            hints_callback = NULL;
+            linenoise_hints_cb_t *hc = l->ctx->hints_callback;
+            l->ctx->hints_callback = NULL;
             refresh_line(l);
-            hints_callback = hc;
+            l->ctx->hints_callback = hc;
         }
         return ln_strdup(l->buf);
     case CTRL_C:     /* ctrl-c */
+        history_drop_placeholder(l);
         errno = EAGAIN;
         set_error(LINENOISE_ERR_INTERRUPTED);
         return NULL;
@@ -2410,8 +2377,7 @@ char *linenoise_edit_feed(linenoise_state_t *l) {
             undo_save(l);
             linenoise_edit_delete(l);
         } else {
-            history_len--;
-            ln_free(history[history_len]);
+            history_drop_placeholder(l);
             errno = ENOENT;
             set_error(LINENOISE_ERR_EOF);
             return NULL;
@@ -2460,7 +2426,7 @@ char *linenoise_edit_feed(linenoise_state_t *l) {
         /* ESC [ sequences. */
         if (seq[0] == '[') {
             /* SGR mouse event: ESC [ < button ; x ; y M/m */
-            if (seq[1] == '<' && mousemode) {
+            if (seq[1] == '<' && l->ctx->mousemode) {
                 /* Read the rest of the mouse sequence. */
                 char mouse_seq[32];
                 int mi = 0;
@@ -2666,15 +2632,21 @@ char *linenoise_edit_feed(linenoise_state_t *l) {
     return linenoise_edit_more;
 }
 
-/* Internal: Stop editing (restores terminal). */
+/* Internal: End the session and restore the terminal. */
 static void edit_stop(linenoise_state_t *l) {
+    linenoise_context_t *ctx = l->ctx;
+
+    history_drop_placeholder(l);
+    undo_free(l);
+    if (ctx->session == l) ctx->session = NULL;
+
     if (!isatty(l->ifd) && !getenv("LINENOISE_ASSUME_TTY")) return;
     /* Disable mouse tracking before restoring terminal. */
-    if (mousemode) {
+    if (ctx->mousemode) {
         disable_mouse_tracking(l->ofd);
     }
     disable_bracketed_paste(l->ofd);
-    disable_raw_mode(l->ifd);
+    disable_raw_mode(ctx);
     printf("\n");
 }
 
@@ -2690,36 +2662,13 @@ void linenoise_edit_stop(linenoise_state_t *l) {
         l->buf = NULL;
         l->buf_dynamic = 0;
     }
-
-    /* Restore global state if we're in an active edit session. */
-    if (edit_saved_state.active) {
-        /* Update context history from global state. */
-        if (edit_saved_state.ctx) {
-            edit_saved_state.ctx->history_len = history_len;
-            edit_saved_state.ctx->history = history;
-        }
-
-        /* Restore previous global state. */
-        maskmode = edit_saved_state.maskmode;
-        mlmode = edit_saved_state.mlmode;
-        mousemode = edit_saved_state.mousemode;
-        completion_callback = edit_saved_state.completion_callback;
-        hints_callback = edit_saved_state.hints_callback;
-        free_hints_callback = edit_saved_state.free_hints_callback;
-        highlight_callback = edit_saved_state.highlight_callback;
-        history_len = edit_saved_state.history_len;
-        history_max_len = edit_saved_state.history_max_len;
-        history = edit_saved_state.history;
-        edit_saved_state.active = 0;
-        edit_saved_state.ctx = NULL;
-    }
 }
 
 /* This just implements a blocking loop for the multiplexed API.
  * In many applications that are not event-drivern, we can just call
  * the blocking linenoise API, wait for the user to complete the editing
  * and return the buffer. */
-static char *blocking_edit(int stdin_fd, int stdout_fd, const char *prompt)
+static char *blocking_edit(linenoise_context_t *ctx, int stdin_fd, int stdout_fd, const char *prompt)
 {
     linenoise_state_t l;
     char *buf = ln_malloc(LINENOISE_MAX_LINE);
@@ -2731,7 +2680,7 @@ static char *blocking_edit(int stdin_fd, int stdout_fd, const char *prompt)
         return NULL;
     }
 
-    if (edit_start(&l,stdin_fd,stdout_fd,buf,LINENOISE_MAX_LINE,prompt) == -1) {
+    if (edit_start(ctx,&l,stdin_fd,stdout_fd,buf,LINENOISE_MAX_LINE,prompt) == -1) {
         ln_free(buf);
         return NULL;
     }
@@ -2748,11 +2697,14 @@ static char *blocking_edit(int stdin_fd, int stdout_fd, const char *prompt)
  * on screen for debugging / development purposes. It is implemented
  * by the linenoise_example program using the --keycodes option. */
 void linenoise_print_key_codes(void) {
+    linenoise_context_t kc;
     char quit[4];
+
+    memset(&kc, 0, sizeof(kc));
 
     printf("Linenoise key codes debugging mode.\n"
             "Press keys to see scan codes. Type 'quit' at any time to exit.\n");
-    if (enable_raw_mode(STDIN_FILENO) == -1) return;
+    if (enable_raw_mode(&kc, STDIN_FILENO) == -1) return;
     memset(quit,' ',4);
     while(1) {
         char c;
@@ -2769,7 +2721,7 @@ void linenoise_print_key_codes(void) {
         printf("\r"); /* Go left edge manually, we are in raw mode. */
         fflush(stdout);
     }
-    disable_raw_mode(STDIN_FILENO);
+    disable_raw_mode(&kc);
 }
 
 /* This function is called when linenoise() is called with the standard
@@ -2827,12 +2779,12 @@ static char *linenoise_no_tty(void) {
     return read_file_line(stdin,NULL);
 }
 
-/* Internal: The high level line reading function using global state.
+/* Internal: The high level line reading function.
  * This function checks if the terminal has basic capabilities, just checking
  * for a blacklist of stupid terminals, and later either calls the line
  * editing function or uses dummy fgets() so that you will be able to type
  * something even in the most desperate of the conditions. */
-static char *read_line(const char *prompt) {
+static char *read_line(linenoise_context_t *ctx, const char *prompt) {
     if (!isatty(STDIN_FILENO) && !getenv("LINENOISE_ASSUME_TTY")) {
         /* Not a tty: read from file / pipe. In this mode we don't want any
          * limit to the line size, so we call a function to handle that. */
@@ -2855,7 +2807,7 @@ static char *read_line(const char *prompt) {
         }
         return retval;
     } else {
-        return blocking_edit(STDIN_FILENO,STDOUT_FILENO,prompt);
+        return blocking_edit(ctx,STDIN_FILENO,STDOUT_FILENO,prompt);
     }
 }
 
@@ -2870,58 +2822,65 @@ void linenoise_free(void *ptr) {
 
 /* ================================ History ================================= */
 
-/* Free the history, but does not reset it. Only used when we have to
- * exit() to avoid memory leaks are reported by valgrind & co. */
-static void free_history(void) {
-    if (history) {
-        int j;
-
-        for (j = 0; j < history_len; j++)
-            ln_free(history[j]);
-        ln_free(history);
-    }
-}
-
 /* At exit we'll try to fix the terminal to the initial conditions. */
 static void linenoise_at_exit(void) {
-    disable_raw_mode(STDIN_FILENO);
-    free_history();
+    if (raw_ctx) disable_raw_mode(raw_ctx);
 }
 
-/* Internal: Add a new entry to the global history.
+/* Internal: Append a copy of 'line' to the context history, without the
+ * duplicate check. While a session is active its own line stays last, so
+ * the new entry goes right before it.
  * It uses a fixed array of char pointers that are shifted (memmoved)
  * when the history max length is reached in order to remove the older
  * entry and make room for the new one, so it is not exactly suitable for huge
- * histories, but will work well for a few hundred of entries.
- *
- * Using a circular buffer is smarter, but a bit more complex to handle. */
-static int history_add(const char *line) {
+ * histories, but will work well for a few hundred of entries. */
+static int history_push(linenoise_context_t *ctx, const char *line) {
+    int pinned = ctx->placeholder;
     char *linecopy;
+    int pos;
 
-    if (history_max_len == 0) return 0;
+    if (ctx->history_max_len == 0) return 0;
 
     /* Initialization on first call. */
-    if (history == NULL) {
-        history = ln_malloc(sizeof(char*)*history_max_len);
-        if (history == NULL) return 0;
-        memset(history,0,(sizeof(char*)*history_max_len));
+    if (ctx->history == NULL) {
+        ctx->history = ln_malloc(sizeof(char*)*ctx->history_max_len);
+        if (ctx->history == NULL) return 0;
+        memset(ctx->history,0,(sizeof(char*)*ctx->history_max_len));
     }
 
-    /* Don't add duplicated lines. */
-    if (history_len && !strcmp(history[history_len-1], line)) return 0;
-
-    /* Add an heap allocated copy of the line in the history.
-     * If we reached the max length, remove the older line. */
+    /* No room if the session's own line fills the history. */
+    if (ctx->history_max_len <= pinned) return 0;
     linecopy = ln_strdup(line);
     if (!linecopy) return 0;
-    if (history_len == history_max_len) {
-        ln_free(history[0]);
-        memmove(history,history+1,sizeof(char*)*(history_max_len-1));
-        history_len--;
+
+    /* If we reached the max length, remove the older line. */
+    if (ctx->history_len == ctx->history_max_len) {
+        ln_free(ctx->history[0]);
+        memmove(ctx->history,ctx->history+1,sizeof(char*)*(ctx->history_max_len-1));
+        ctx->history_len--;
     }
-    history[history_len] = linecopy;
-    history_len++;
+    pos = ctx->history_len - pinned;
+    memmove(ctx->history+pos+1,ctx->history+pos,sizeof(char*)*pinned);
+    ctx->history[pos] = linecopy;
+    ctx->history_len++;
+
+    /* Keep a session that is browsing history on the same entry. */
+    if (pinned && ctx->session->history_index > 0) {
+        ctx->session->history_index++;
+        if (ctx->session->history_index >= ctx->history_len)
+            ctx->session->history_index = ctx->history_len-1;
+    }
     return 1;
+}
+
+/* Internal: Remove the session's own line from the context history. */
+static void history_drop_placeholder(linenoise_state_t *l) {
+    linenoise_context_t *ctx = l->ctx;
+
+    if (!ctx->placeholder) return;
+    ctx->history_len--;
+    ln_free(ctx->history[ctx->history_len]);
+    ctx->placeholder = 0;
 }
 
 /* ========================= Context-based API ============================== */
@@ -2931,30 +2890,18 @@ linenoise_context_t *linenoise_context_create(void) {
     linenoise_context_t *ctx = ln_malloc(sizeof(linenoise_context_t));
     if (!ctx) return NULL;
 
-#ifdef _WIN32
-    ctx->orig_console_mode = 0;
-#else
-    memset(&ctx->orig_termios, 0, sizeof(ctx->orig_termios));
-#endif
-    ctx->rawmode = 0;
-    ctx->atexit_registered = 0;
-    ctx->maskmode = 0;
-    ctx->mlmode = 0;
-    ctx->mousemode = 0;
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->raw_fd = -1;
     ctx->history_max_len = LINENOISE_DEFAULT_HISTORY_MAX_LEN;
-    ctx->history_len = 0;
-    ctx->history = NULL;
-    ctx->completion_callback = NULL;
-    ctx->hints_callback = NULL;
-    ctx->free_hints_callback = NULL;
-    ctx->highlight_callback = NULL;
-
     return ctx;
 }
 
 /* Destroy a linenoise context and free all associated resources. */
 void linenoise_context_destroy(linenoise_context_t *ctx) {
     if (!ctx) return;
+
+    /* Restore the terminal and drop the at-exit reference to ctx. */
+    disable_raw_mode(ctx);
 
     /* Free history. */
     if (ctx->history) {
@@ -2979,7 +2926,13 @@ void linenoise_set_mask_mode(linenoise_context_t *ctx, int enable) {
 
 /* Set mouse mode for a context (click to position cursor). */
 void linenoise_set_mouse_mode(linenoise_context_t *ctx, int enable) {
-    if (ctx) ctx->mousemode = enable;
+    if (!ctx) return;
+    /* Apply the change to an active session's terminal right away. */
+    if (ctx->session && ctx->mousemode != enable) {
+        if (enable) enable_mouse_tracking(ctx->session->ofd);
+        else disable_mouse_tracking(ctx->session->ofd);
+    }
+    ctx->mousemode = enable;
 }
 
 /* Set completion callback for a context. */
@@ -3004,35 +2957,14 @@ void linenoise_set_highlight_callback(linenoise_context_t *ctx, linenoise_highli
 
 /* Add a line to history for a context. */
 int linenoise_history_add(linenoise_context_t *ctx, const char *line) {
-    char *linecopy;
+    int last;
 
     if (!ctx) return 0;
-    if (ctx->history_max_len == 0) return 0;
 
     /* Don't add duplicates of the previous line. */
-    if (ctx->history_len && !strcmp(ctx->history[ctx->history_len-1], line))
-        return 0;
-
-    linecopy = ln_strdup(line);
-    if (!linecopy) return 0;
-
-    if (ctx->history == NULL) {
-        ctx->history = ln_malloc(sizeof(char*) * ctx->history_max_len);
-        if (ctx->history == NULL) {
-            ln_free(linecopy);
-            return 0;
-        }
-        memset(ctx->history, 0, sizeof(char*) * ctx->history_max_len);
-    }
-
-    if (ctx->history_len == ctx->history_max_len) {
-        ln_free(ctx->history[0]);
-        memmove(ctx->history, ctx->history + 1, sizeof(char*) * (ctx->history_max_len - 1));
-        ctx->history_len--;
-    }
-    ctx->history[ctx->history_len] = linecopy;
-    ctx->history_len++;
-    return 1;
+    last = ctx->history_len - ctx->placeholder - 1;
+    if (last >= 0 && !strcmp(ctx->history[last], line)) return 0;
+    return history_push(ctx, line);
 }
 
 /* Set maximum history length for a context. */
@@ -3062,6 +2994,8 @@ int linenoise_history_set_max_len(linenoise_context_t *ctx, int len) {
     ctx->history_max_len = len;
     if (ctx->history_len > ctx->history_max_len)
         ctx->history_len = ctx->history_max_len;
+    if (ctx->session && ctx->session->history_index >= ctx->history_len)
+        ctx->session->history_index = ctx->history_len > 0 ? ctx->history_len-1 : 0;
     return 1;
 }
 
@@ -3123,59 +3057,13 @@ int linenoise_history_load(linenoise_context_t *ctx, const char *filename) {
     return 0;
 }
 
-/* Main line editing function using a context.
- * Note: This is a simplified version that uses the global state internally
- * but respects the context's settings. A full implementation would require
- * threading the context through all internal functions. */
+/* Main line editing function using a context. */
 char *linenoise_read(linenoise_context_t *ctx, const char *prompt) {
-    if (!ctx) return NULL;
-
-    /* Temporarily set global state from context for backward compatibility
-     * with internal functions. This is a transitional approach. */
-    int saved_maskmode = maskmode;
-    int saved_mlmode = mlmode;
-    int saved_mousemode = mousemode;
-    linenoise_completion_cb_t *saved_completion = completion_callback;
-    linenoise_hints_cb_t *saved_hints = hints_callback;
-    linenoise_free_hints_cb_t *saved_freehints = free_hints_callback;
-    linenoise_highlight_cb_t *saved_highlight = highlight_callback;
-
-    maskmode = ctx->maskmode;
-    mlmode = ctx->mlmode;
-    mousemode = ctx->mousemode;
-    completion_callback = ctx->completion_callback;
-    hints_callback = ctx->hints_callback;
-    free_hints_callback = ctx->free_hints_callback;
-    highlight_callback = ctx->highlight_callback;
-
-    /* Also temporarily swap history. */
-    int saved_history_len = history_len;
-    int saved_history_max_len = history_max_len;
-    char **saved_history = history;
-    history_len = ctx->history_len;
-    history_max_len = ctx->history_max_len;
-    history = ctx->history;
-
-    /* Call the internal line reading function. */
-    char *result = read_line(prompt);
-
-    /* Copy back any history changes. */
-    ctx->history_len = history_len;
-    ctx->history = history;
-
-    /* Restore global state. */
-    maskmode = saved_maskmode;
-    mlmode = saved_mlmode;
-    mousemode = saved_mousemode;
-    completion_callback = saved_completion;
-    hints_callback = saved_hints;
-    free_hints_callback = saved_freehints;
-    highlight_callback = saved_highlight;
-    history_len = saved_history_len;
-    history_max_len = saved_history_max_len;
-    history = saved_history;
-
-    return result;
+    if (!ctx || ctx->session) {
+        set_error(LINENOISE_ERR_INVALID);
+        return NULL;
+    }
+    return read_line(ctx, prompt);
 }
 
 /* Clear the screen using the context's output (currently just uses stdout). */

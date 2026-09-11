@@ -47,7 +47,7 @@ int main(void) {
 
 ## Context Management
 
-All linenoise operations require a context. Contexts are independent and thread-safe when used separately.
+All linenoise operations require a context. Each context has its own history, callbacks and settings, and at most one active editing session. Separate contexts may be used from separate threads, each on its own terminal.
 
 ### Creating a Context
 
@@ -345,6 +345,8 @@ if (line == linenoise_edit_more) {
     linenoise_free(line);
 }
 ```
+
+A second `linenoise_edit_start()` or `linenoise_read()` on a context with an active session fails with `LINENOISE_ERR_INVALID`. Several sessions can run at once on separate contexts. Setters and `linenoise_history_add()` may be called during a session and take effect immediately.
 
 ### Hiding/Showing the Line
 

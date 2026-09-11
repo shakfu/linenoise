@@ -433,6 +433,12 @@ if(BUILD_TESTS AND NOT WIN32)
         ENVIRONMENT "PATH=$<TARGET_FILE_DIR:linenoise-example>;$ENV{PATH}"
         DEPENDS linenoise-example
     )
+
+    # In-process tests for context isolation (links the library directly)
+    find_package(Threads REQUIRED)
+    add_executable(test-context test/test-context.c)
+    target_link_libraries(test-context PRIVATE linenoise Threads::Threads)
+    add_test(NAME test-context COMMAND test-context)
 endif()
 
 # Installation

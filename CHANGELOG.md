@@ -6,8 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-Ported from upstream [antirez/linenoise](https://github.com/antirez/linenoise)
-(shakfu/linenoise#1).
+Includes changes ported from upstream
+[antirez/linenoise](https://github.com/antirez/linenoise) (shakfu/linenoise#1).
 
 ### Added
 
@@ -28,6 +28,10 @@ Ported from upstream [antirez/linenoise](https://github.com/antirez/linenoise)
   to `LINENOISE_MAX_LINE` bytes per entry.
 - The blocking API (`linenoise_read()`) now edits in a dynamically grown
   buffer instead of a fixed 4 KB stack buffer, so large pastes fit.
+- `linenoise_state_t` gains `ctx` and undo-stack fields, so its size changes;
+  rebuild code that allocates it. A context allows one active session: a
+  second `linenoise_edit_start()` or `linenoise_read()` on it fails with
+  `LINENOISE_ERR_INVALID`.
 
 ### Fixed
 
@@ -38,6 +42,19 @@ Ported from upstream [antirez/linenoise](https://github.com/antirez/linenoise)
   literal tab character.
 - The test suite's VT100 emulator now honors `ESC[0K` and ignores private mode
   sequences such as `ESC[?2004h`.
+- Contexts are now independent. Each session copied its context into
+  file-scope globals and restored them from a single saved slot, so a second
+  active session took over the first: TAB in session A called B's completion
+  callback, and ENTER in A freed an entry of B's history. The undo stack, saved
+  termios and `linenoise_get_error()` were also process-wide, so separate
+  contexts on separate threads raced. Editing code now reads the context
+  through the session.
+- `linenoise_history_add()` during a session no longer loses the entry. New
+  entries go before the session's in-progress line instead of being dropped
+  when the session stops.
+- Ctrl-C no longer leaves an empty entry in history.
+- Setters called during a session take effect immediately, not at the next
+  session.
 
 ## [2.0.0] - 2026-01-28
 

@@ -1265,6 +1265,60 @@ static void test_tab_no_completions(void) {
     test_end();
 }
 
+/* An arrow key during completion must not insert the bytes after ESC.
+ * Left accepts the shown candidate, then moves the cursor. The example's
+ * hints callback appends " World" to "hello". */
+static void test_completion_arrow_accepts(void) {
+    if (test_start("Completion Arrow Accepts", "./linenoise-example") == -1) return;
+
+    send_keys("h");
+    send_keys("\t");
+    assert_screen_row(0, "hello> hello World");
+    send_keys(KEY_LEFT);
+    assert_screen_row(0, "hello> hello World");
+    assert_cursor(0, strlen("hello> hell"));
+
+    test_end();
+}
+
+/* Down and a lone ESC both restore the line as typed. */
+static void test_completion_cancel(void) {
+    if (test_start("Completion Cancel", "./linenoise-example") == -1) return;
+
+    send_keys("h");
+    send_keys("\t");
+    send_keys(KEY_DOWN);
+    assert_screen_row(0, "hello> h");
+
+    send_keys("\t");
+    assert_screen_row(0, "hello> hello World");
+    send_keys("\x1b");
+    usleep(150000);  /* Exceed the 100ms escape sequence timeout. */
+    send_keys("x");
+    assert_screen_row(0, "hello> hx");
+
+    test_end();
+}
+
+/* Alt+key is ESC plus one byte. It must act at once and not swallow the
+ * next key. */
+static void test_alt_word_movement(void) {
+    if (test_start("Alt Word Movement", "./linenoise-example") == -1) return;
+
+    send_keys("foo bar");
+    send_keys("\x1b" "b");
+    assert_cursor(0, strlen("hello> foo "));
+
+    send_keys("\x1b" "bX");
+    assert_screen_row(0, "hello> Xfoo bar");
+
+    send_keys(KEY_CTRL_E "\x1b\x7f");  /* Alt+Backspace deletes "bar". */
+    assert_screen_row(0, "hello> Xfoo");
+    assert_cursor(0, strlen("hello> Xfoo "));
+
+    test_end();
+}
+
 static void test_ansi_prompt_width(void) {
     /* The --ansi-prompt option produces "\x1b[31mred\x1b[32mgreen\x1b[0m> ":
      * visible glyphs are "redgreen> " (10 columns), but the raw string is
@@ -1406,12 +1460,12 @@ static void test_bracketed_paste_multiple(void) {
     test_end();
 }
 
-/* Completion previews temporarily replace the edit buffer. Active folds from
- * the real buffer must not affect rendering of the completion text.
+/* A span that overlaps a folded paste is refused: the whole paste is the
+ * word before the cursor, so TAB beeps and the line is unchanged.
  *
- * A long single line paste is used here: with a multi line paste the cursor
- * would sit after a newline, where TAB indents the continuation line instead
- * of completing. */
+ * A long single line paste is used in these tests: with a multi line paste
+ * the cursor would sit after a newline, where TAB indents the continuation
+ * line instead of completing. */
 static void test_bracketed_paste_completion(void) {
     char paste[256];
     char expected[64];
@@ -1429,7 +1483,65 @@ static void test_bracketed_paste_completion(void) {
     assert_screen_row(0, expected);
 
     send_keys("\t");
-    assert_row_contains(0, "hello> hello");
+    assert_screen_row(0, expected);
+
+    test_end();
+}
+
+/* A fold before the span keeps its offsets in the preview. */
+static void test_completion_fold_before(void) {
+    char paste[256];
+    char expected[96];
+    size_t pasted = 210;
+
+    if (test_start("Completion Fold Before", "./linenoise-example") == -1) return;
+
+    memset(paste, 'x', pasted);
+    paste[pasted] = '\0';
+    send_keys("\x1b[200~");
+    send_keys(paste);
+    send_keys("\x1b[201~");
+    send_keys(" h\t");
+    snprintf(expected, sizeof(expected), "hello> [... %zu pasted chars ...] hello", pasted);
+    assert_screen_row(0, expected);
+
+    test_end();
+}
+
+/* A fold after the span shifts by the length change in the preview. */
+static void test_completion_fold_after(void) {
+    char paste[256];
+    char expected[96];
+    size_t pasted = 210;
+
+    if (test_start("Completion Fold After", "./linenoise-example") == -1) return;
+
+    memset(paste, 'x', pasted);
+    paste[pasted] = '\0';
+    send_keys("h ");
+    send_keys("\x1b[200~");
+    send_keys(paste);
+    send_keys("\x1b[201~");
+    send_keys(KEY_HOME KEY_RIGHT "\t");
+    snprintf(expected, sizeof(expected), "hello> hello [... %zu pasted chars ...]", pasted);
+    assert_screen_row(0, expected);
+    assert_cursor(0, strlen("hello> hello"));
+
+    test_end();
+}
+
+/* Completion mid-line replaces the word before the cursor and keeps the
+ * rest of the line. */
+static void test_completion_mid_line(void) {
+    if (test_start("Completion Mid Line", "./linenoise-example") == -1) return;
+
+    send_keys("say h world");
+    send_keys(KEY_LEFT KEY_LEFT KEY_LEFT KEY_LEFT KEY_LEFT KEY_LEFT);
+    send_keys("\t");
+    assert_screen_row(0, "hello> say hello world");
+    send_keys("X");
+    assert_screen_row(0, "hello> say helloX world");
+    assert_cursor(0, strlen("hello> say helloX"));
 
     test_end();
 }
@@ -1485,6 +1597,9 @@ int main(int argc, char **argv) {
     test_ctrl_w_delete_word();
     test_ctrl_u_delete_line();
     test_tab_no_completions();
+    test_completion_arrow_accepts();
+    test_completion_cancel();
+    test_alt_word_movement();
     test_ansi_prompt_width();
     test_bracketed_paste_inline();
     test_bracketed_paste_fold();
@@ -1493,6 +1608,9 @@ int main(int argc, char **argv) {
     test_bracketed_paste_surround();
     test_bracketed_paste_multiple();
     test_bracketed_paste_completion();
+    test_completion_fold_before();
+    test_completion_fold_after();
+    test_completion_mid_line();
     test_bracketed_paste_ctrl_t();
 
     /* Horizontal scrolling tests (single-line mode). */

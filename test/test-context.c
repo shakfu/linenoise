@@ -84,11 +84,13 @@ static char *history_dump(linenoise_context_t *ctx) {
 }
 
 static int calls_a, calls_b;
-static void complete_a(const char *buf, linenoise_completions_t *lc) {
-    (void)buf; (void)lc; calls_a++;
+static void complete_a(const char *buf, size_t pos, linenoise_completions_t *lc,
+                        void *udata) {
+    (void)buf; (void)pos; (void)lc; (void)udata; calls_a++;
 }
-static void complete_b(const char *buf, linenoise_completions_t *lc) {
-    (void)buf; (void)lc; calls_b++;
+static void complete_b(const char *buf, size_t pos, linenoise_completions_t *lc,
+                        void *udata) {
+    (void)buf; (void)pos; (void)lc; (void)udata; calls_b++;
 }
 
 /* ========================= Tests ========================= */
@@ -98,8 +100,8 @@ static void test_interleaved_completion(void) {
     linenoise_context_t *b = linenoise_context_create();
     session_t sa, sb;
     calls_a = calls_b = 0;
-    linenoise_set_completion_callback(a, complete_a);
-    linenoise_set_completion_callback(b, complete_b);
+    linenoise_set_completion_callback(a, complete_a, NULL);
+    linenoise_set_completion_callback(b, complete_b, NULL);
 
     session_start(&sa, a, "a> ");
     session_start(&sb, b, "b> ");
@@ -231,11 +233,119 @@ static void test_setter_during_session(void) {
     calls_a = 0;
 
     session_start(&s, c, "c> ");
-    linenoise_set_completion_callback(c, complete_a);
+    linenoise_set_completion_callback(c, complete_a, NULL);
     session_feed(&s, "x\t");
     CHECK(calls_a == 1, "callback set mid-session called %d times", calls_a);
     session_stop(&s);
     linenoise_context_destroy(c);
+}
+
+/* Each callback receives its own setter's udata and the cursor offset. */
+static int tag_c, tag_h, tag_hl;
+static void *seen_c, *seen_h, *seen_free, *seen_hl;
+static size_t pos_c, pos_h, pos_hl;
+static void udata_complete(const char *buf, size_t pos, linenoise_completions_t *lc,
+                           void *udata) {
+    (void)buf; (void)lc;
+    seen_c = udata; pos_c = pos;
+}
+static char *udata_hints(const char *buf, size_t pos, int *color, int *bold, void *udata) {
+    (void)buf; (void)color; (void)bold;
+    seen_h = udata; pos_h = pos;
+    return strdup("hint");
+}
+static void udata_free_hints(void *hint, void *udata) {
+    seen_free = udata;
+    free(hint);
+}
+static void udata_highlight(const char *buf, char *colors, size_t len, size_t pos,
+                            void *udata) {
+    (void)buf; (void)colors; (void)len;
+    seen_hl = udata; pos_hl = pos;
+}
+
+static void test_callback_udata(void) {
+    linenoise_context_t *ctx = linenoise_context_create();
+    session_t s;
+    linenoise_set_completion_callback(ctx, udata_complete, &tag_c);
+    linenoise_set_hints_callback(ctx, udata_hints, &tag_h);
+    linenoise_set_free_hints_callback(ctx, udata_free_hints);
+    linenoise_set_highlight_callback(ctx, udata_highlight, &tag_hl);
+
+    session_start(&s, ctx, "> ");
+    session_feed(&s, "abc\x02\x02");  /* Cursor after 'a'. */
+    CHECK(seen_h == &tag_h && pos_h == 1, "hints: udata ok=%d pos=%zu", seen_h == &tag_h, pos_h);
+    CHECK(seen_free == &tag_h, "free hints: udata ok=%d", seen_free == &tag_h);
+    CHECK(seen_hl == &tag_hl && pos_hl == 1, "highlight: udata ok=%d pos=%zu", seen_hl == &tag_hl, pos_hl);
+    session_feed(&s, "\t");
+    CHECK(seen_c == &tag_c && pos_c == 1, "completion: udata ok=%d pos=%zu", seen_c == &tag_c, pos_c);
+    session_stop(&s);
+    linenoise_context_destroy(ctx);
+}
+
+/* Completion replaces buf[start, pos) with the candidate. */
+static size_t span_start;
+static const char *span_cand;
+static void span_complete(const char *buf, size_t pos, linenoise_completions_t *lc,
+                          void *udata) {
+    (void)buf; (void)pos; (void)udata;
+    lc->start = span_start;
+    linenoise_add_completion(lc, span_cand);
+}
+
+/* Start a session, type 'keys', TAB, then Ctrl-B to accept. */
+static void span_run(session_t *s, linenoise_context_t *ctx, const char *keys,
+                     size_t start, const char *cand) {
+    span_start = start;
+    span_cand = cand;
+    session_start(s, ctx, "> ");
+    session_feed(s, keys);
+    session_feed(s, "\t\x02");
+}
+
+static void test_completion_span(void) {
+    linenoise_context_t *ctx = linenoise_context_create();
+    session_t s;
+    linenoise_set_completion_callback(ctx, span_complete, NULL);
+
+    span_run(&s, ctx, "abc\x02", 1, "XYZ");  /* Replace "b", keep "c". */
+    CHECK(strcmp(s.buf, "aXYZc") == 0, "span: \"%s\"", s.buf);
+    CHECK(s.st.pos == 3, "span: pos=%zu after accept and Ctrl-B", s.st.pos);
+    session_feed(&s, "\x1a");
+    CHECK(strcmp(s.buf, "abc") == 0, "undo after accept: \"%s\"", s.buf);
+    session_stop(&s);
+
+    span_run(&s, ctx, "abc\x02", 100, "XYZ");  /* start > pos: insert. */
+    CHECK(strcmp(s.buf, "abXYZc") == 0, "start past cursor: \"%s\"", s.buf);
+    session_stop(&s);
+
+    span_run(&s, ctx, "a\xc3\xa9", 2, "XYZ");  /* start inside U+00E9. */
+    CHECK(strcmp(s.buf, "aXYZ") == 0, "start inside UTF-8: \"%s\"", s.buf);
+    session_stop(&s);
+
+    linenoise_context_destroy(ctx);
+}
+
+/* A candidate longer than a fixed buffer is truncated, and len matches. */
+static void test_completion_fixed_buffer(void) {
+    linenoise_context_t *ctx = linenoise_context_create();
+    linenoise_state_t st;
+    char buf[8];
+    int in[2];
+    int out = open("/dev/null", O_WRONLY);
+
+    span_start = 0;
+    span_cand = "0123456789";
+    linenoise_set_completion_callback(ctx, span_complete, NULL);
+    if (pipe(in) == -1) return;
+    fcntl(in[0], F_SETFL, O_NONBLOCK);
+    linenoise_edit_start(ctx, &st, in[0], out, buf, sizeof(buf), "> ");
+    if (write(in[1], "h\t\x02", 3) != 3) return;
+    for (int i = 0; i < 4; i++) linenoise_edit_feed(&st);
+    CHECK(strcmp(buf, "0123456") == 0 && st.len == 7, "fixed buffer: \"%s\" len=%zu", buf, st.len);
+    linenoise_edit_stop(&st);
+    close(in[0]); close(in[1]); close(out);
+    linenoise_context_destroy(ctx);
 }
 
 static void test_one_session_per_context(void) {
@@ -252,6 +362,48 @@ static void test_one_session_per_context(void) {
     CHECK(session_start(&s2, c, "2> ") == 0, "start after stop failed");
     session_stop(&s2);
     linenoise_context_destroy(c);
+}
+
+/* A width change is picked up on the next key, or at once by
+ * linenoise_resize(). */
+static void test_resize(void) {
+    linenoise_context_t *ctx = linenoise_context_create();
+    session_t s;
+    session_start(&s, ctx, "> ");
+    CHECK(s.st.cols == 80, "cols at start: %zu", s.st.cols);
+
+    setenv("LINENOISE_COLS", "40", 1);
+    session_feed(&s, "a");
+    CHECK(s.st.cols == 40, "cols after key: %zu", s.st.cols);
+
+    setenv("LINENOISE_COLS", "30", 1);
+    linenoise_resize(&s.st);
+    CHECK(s.st.cols == 30, "cols after linenoise_resize(): %zu", s.st.cols);
+
+    setenv("LINENOISE_COLS", "80", 1);
+    session_stop(&s);
+    linenoise_context_destroy(ctx);
+}
+
+/* Ctrl+Left/Right move by words; any whitespace separates words. */
+static void test_word_keys(void) {
+    linenoise_context_t *ctx = linenoise_context_create();
+    session_t s;
+    session_start(&s, ctx, "> ");
+
+    session_feed(&s, "foo bar\x1b[1;5D");
+    CHECK(s.st.pos == 4, "Ctrl+Left: pos=%zu", s.st.pos);
+    session_feed(&s, "\x01\x1b[1;5C");
+    CHECK(s.st.pos == 4, "Ctrl+Right: pos=%zu", s.st.pos);
+    session_stop(&s);
+
+    /* No completion callback, so TAB is inserted as text. */
+    session_start(&s, ctx, "> ");
+    session_feed(&s, "foo\tbar\x17");
+    CHECK(strcmp(s.buf, "foo\t") == 0, "Ctrl-W after TAB: \"%s\"", s.buf);
+    session_stop(&s);
+
+    linenoise_context_destroy(ctx);
 }
 
 /* Each thread runs many sessions on its own context. */
@@ -271,11 +423,13 @@ static void complete_thread(int idx) {
     if (!pthread_equal(pthread_self(), thread_args[idx].self))
         thread_args[idx].wrong_thread++;
 }
-static void complete_t0(const char *buf, linenoise_completions_t *lc) {
-    (void)buf; (void)lc; complete_thread(0);
+static void complete_t0(const char *buf, size_t pos, linenoise_completions_t *lc,
+                        void *udata) {
+    (void)buf; (void)pos; (void)lc; (void)udata; complete_thread(0);
 }
-static void complete_t1(const char *buf, linenoise_completions_t *lc) {
-    (void)buf; (void)lc; complete_thread(1);
+static void complete_t1(const char *buf, size_t pos, linenoise_completions_t *lc,
+                        void *udata) {
+    (void)buf; (void)pos; (void)lc; (void)udata; complete_thread(1);
 }
 
 static void *thread_main(void *p) {
@@ -302,7 +456,7 @@ static void test_threads_separate_contexts(void) {
     pthread_t th[2];
     for (int i = 0; i < 2; i++) {
         thread_args[i].ctx = linenoise_context_create();
-        linenoise_set_completion_callback(thread_args[i].ctx, i ? complete_t1 : complete_t0);
+        linenoise_set_completion_callback(thread_args[i].ctx, i ? complete_t1 : complete_t0, NULL);
     }
     for (int i = 0; i < 2; i++)
         pthread_create(&th[i], NULL, thread_main, &thread_args[i]);
@@ -332,6 +486,11 @@ int main(void) {
     test_ctrl_c_leaves_history_clean();
     test_setter_during_session();
     test_one_session_per_context();
+    test_resize();
+    test_callback_udata();
+    test_completion_span();
+    test_completion_fixed_buffer();
+    test_word_keys();
     test_threads_separate_contexts();
 
     printf("test-context: %d checks, %d failed\n", tests_run, tests_failed);

@@ -207,7 +207,10 @@ void haskell_highlight_free(void) {
     }
 }
 
-void haskell_highlight_callback(const char *buf, char *colors, size_t len) {
+void haskell_highlight_callback(const char *buf, char *colors, size_t len,
+                                size_t pos, void *udata) {
+    (void)pos;
+    (void)udata;
     TSTree *tree;
     TSNode root;
     TSQueryMatch match;

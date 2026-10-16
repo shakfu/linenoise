@@ -261,7 +261,10 @@ void lua_highlight_free(void) {
     }
 }
 
-void lua_highlight_callback(const char *buf, char *colors, size_t len) {
+void lua_highlight_callback(const char *buf, char *colors, size_t len,
+                            size_t pos, void *udata) {
+    (void)pos;
+    (void)udata;
     TSTree *tree;
     TSNode root;
     TSQueryMatch match;

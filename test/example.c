@@ -8,14 +8,21 @@
 #endif
 #include "linenoise.h"
 
-void completion(const char *buf, linenoise_completions_t *lc) {
-    if (buf[0] == 'h') {
-        linenoise_add_completion(lc,"hello");
-        linenoise_add_completion(lc,"hello there");
-    }
+/* Complete the word before the cursor when it starts with 'h'. */
+void completion(const char *buf, size_t pos, linenoise_completions_t *lc,
+                void *udata) {
+    size_t start = pos;
+    (void)udata;
+    while (start > 0 && buf[start-1] != ' ') start--;
+    if (start == pos || buf[start] != 'h') return;
+    lc->start = start;
+    linenoise_add_completion(lc,"hello");
+    linenoise_add_completion(lc,"hello there");
 }
 
-char *hints(const char *buf, int *color, int *bold) {
+char *hints(const char *buf, size_t pos, int *color, int *bold, void *udata) {
+    (void)pos;
+    (void)udata;
     if (!strcasecmp(buf,"hello")) {
         *color = 35;
         *bold = 0;
@@ -76,8 +83,8 @@ int main(int argc, char **argv) {
 
     /* Set the completion callback. This will be called every time the
      * user uses the <tab> key. */
-    linenoise_set_completion_callback(ctx, completion);
-    linenoise_set_hints_callback(ctx, hints);
+    linenoise_set_completion_callback(ctx, completion, NULL);
+    linenoise_set_hints_callback(ctx, hints, NULL);
 
     /* Load history from file. The history file is just a plain text file
      * where entries are separated by newlines. */

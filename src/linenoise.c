@@ -297,6 +297,11 @@ static char *ln_strdup(const char *s) {
 static char *linenoise_no_tty(void);
 static void refresh_line_with_completion(linenoise_state_t *ls, linenoise_completions_t *lc, int flags);
 static void refresh_line_with_flags(linenoise_state_t *l, int flags);
+static void undo_save(linenoise_state_t *l);
+static int edit_grow(linenoise_state_t *l, size_t needed);
+static int edit_insert_no_refresh(linenoise_state_t *l, const char *c, size_t clen);
+static int range_overlaps_fold(linenoise_state_t *l, size_t pos, size_t len);
+static void adjust_folds_after_delete(linenoise_state_t *l, size_t pos, size_t len);
 static int history_push(linenoise_context_t *ctx, const char *line);
 static void history_drop_placeholder(linenoise_state_t *l);
 static void fold_clear(linenoise_state_t *l);
@@ -330,6 +335,9 @@ struct linenoise_context {
     linenoise_hints_cb_t *hints_callback;
     linenoise_free_hints_cb_t *free_hints_callback;
     linenoise_highlight_cb_t *highlight_callback;
+    void *completion_udata;
+    void *hints_udata;
+    void *highlight_udata;
 };
 
 /* Process-wide terminal restore at exit: covers the context that most
@@ -623,10 +631,11 @@ static void disable_bracketed_paste(int fd) {
 
 #ifdef _WIN32
 
-/* Get terminal columns on Windows. */
-static int get_columns(int ifd, int ofd) {
+/* Return the terminal width from LINENOISE_COLS or the console, or -1.
+ * It has no side effects, so it can run on every key. */
+static int query_columns(int ofd) {
     CONSOLE_SCREEN_BUFFER_INFO csbi;
-    (void)ifd; (void)ofd;
+    (void)ofd;
 
     /* Test mode: use LINENOISE_COLS env var for fixed width. */
     char *cols_env = getenv("LINENOISE_COLS");
@@ -635,7 +644,14 @@ static int get_columns(int ifd, int ofd) {
     if (GetConsoleScreenBufferInfo(h_console_output, &csbi)) {
         return csbi.srWindow.Right - csbi.srWindow.Left + 1;
     }
-    return 80;
+    return -1;
+}
+
+/* Get terminal columns on Windows. */
+static int get_columns(int ifd, int ofd) {
+    int cols = query_columns(ofd);
+    (void)ifd;
+    return cols > 0 ? cols : 80;
 }
 
 /* Internal: Clear the screen on Windows. */
@@ -684,18 +700,28 @@ static int get_cursor_position(int ifd, int ofd) {
     return cols;
 }
 
-/* Try to get the number of columns in the current terminal, or assume 80
- * if it fails. */
-static int get_columns(int ifd, int ofd) {
+/* Return the terminal width from LINENOISE_COLS or the window size ioctl,
+ * or -1. It has no side effects, so it can run on every key. */
+static int query_columns(int ofd) {
     struct winsize ws;
 
     /* Test mode: use LINENOISE_COLS env var for fixed width. */
     char *cols_env = getenv("LINENOISE_COLS");
     if (cols_env) return atoi(cols_env);
 
-    if (ioctl(1, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
-        /* ioctl() failed. Try to query the terminal itself. */
-        int start, cols;
+    if (ioctl(ofd, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) return -1;
+    return ws.ws_col;
+}
+
+/* Try to get the number of columns in the current terminal, or assume 80
+ * if it fails. */
+static int get_columns(int ifd, int ofd) {
+    int cols = query_columns(ofd);
+
+    if (cols <= 0) {
+        /* ioctl() failed. Try to query the terminal itself. The reply is
+         * read from ifd, so this must not run while the user types. */
+        int start;
 
         /* Get the initial position so we can restore it later. */
         start = get_cursor_position(ifd,ofd);
@@ -714,10 +740,8 @@ static int get_columns(int ifd, int ofd) {
                 /* Can't recover... */
             }
         }
-        return cols;
-    } else {
-        return ws.ws_col;
     }
+    return cols;
 
 failed:
     return 80;
@@ -750,6 +774,20 @@ static void free_completions(linenoise_completions_t *lc) {
         ln_free(lc->cvec);
 }
 
+/* Ask the callback for the completions at the cursor. The replacement span
+ * comes from caller code, so it is made safe here: a start past the cursor
+ * becomes the cursor, and a start inside a UTF-8 sequence moves back to its
+ * first byte. */
+static void get_completions(linenoise_state_t *ls, linenoise_completions_t *lc) {
+    lc->len = 0;
+    lc->cvec = NULL;
+    lc->start = 0;
+    ls->ctx->completion_callback(ls->buf,ls->pos,lc,ls->ctx->completion_udata);
+    if (lc->start > ls->pos) lc->start = ls->pos;
+    while (lc->start > 0 && ((unsigned char)ls->buf[lc->start] & 0xC0) == 0x80)
+        lc->start--;
+}
+
 /* Called by complete_line() and linenoise_show() to render the current
  * edited line with the proposed completion. If the current completion table
  * is already available, it is passed as second argument, otherwise the
@@ -758,29 +796,68 @@ static void free_completions(linenoise_completions_t *lc) {
  * Flags are the same as refresh_line*(), that is REFRESH_* macros. */
 static void refresh_line_with_completion(linenoise_state_t *ls, linenoise_completions_t *lc, int flags) {
     /* Obtain the table of completions if the caller didn't provide one. */
-    linenoise_completions_t ctable = { 0, NULL };
+    linenoise_completions_t ctable;
     if (lc == NULL) {
-        ls->ctx->completion_callback(ls->buf,&ctable);
+        get_completions(ls,&ctable);
         lc = &ctable;
     }
 
-    /* Show the edited line with completion if possible, or just refresh. */
-    if (ls->completion_idx < lc->len) {
+    /* Show the line with the span replaced by the candidate if possible, or
+     * just refresh. */
+    const char *cand = ls->completion_idx < lc->len ? lc->cvec[ls->completion_idx] : NULL;
+    size_t clen = cand ? strlen(cand) : 0;
+    size_t tail = ls->len - ls->pos;
+    char *preview = cand ? ln_malloc(lc->start + clen + tail + 1) : NULL;
+    if (preview) {
         linenoise_state_t saved = *ls;
-        ls->len = ls->pos = strlen(lc->cvec[ls->completion_idx]);
-        ls->buf = lc->cvec[ls->completion_idx];
-        ls->fold_count = 0;
+        int j;
+
+        memcpy(preview, ls->buf, lc->start);
+        memcpy(preview + lc->start, cand, clen);
+        memcpy(preview + lc->start + clen, ls->buf + ls->pos, tail + 1);
+        /* The span never overlaps a fold, so folds after it only shift. */
+        for (j = 0; j < ls->fold_count; j++) {
+            if (ls->fold_start[j] >= ls->pos) {
+                ls->fold_start[j] = ls->fold_start[j] - ls->pos + lc->start + clen;
+                ls->fold_end[j] = ls->fold_end[j] - ls->pos + lc->start + clen;
+            }
+        }
+        ls->buf = preview;
+        ls->buflen = ls->len = lc->start + clen + tail;
+        ls->pos = lc->start + clen;
         refresh_line_with_flags(ls,flags);
+        ls->buf = saved.buf;
+        ls->buflen = saved.buflen;
         ls->len = saved.len;
         ls->pos = saved.pos;
-        ls->buf = saved.buf;
-        ls->fold_count = saved.fold_count;
+        memcpy(ls->fold_start, saved.fold_start, sizeof(saved.fold_start));
+        memcpy(ls->fold_end, saved.fold_end, sizeof(saved.fold_end));
+        ln_free(preview);
     } else {
         refresh_line_with_flags(ls,flags);
     }
 
     /* Free the completions table if we allocated it locally. */
     if (lc == &ctable) free_completions(&ctable);
+}
+
+/* Replace buf[start, pos) with 'cand' and put the cursor after it. A
+ * candidate that does not fit is truncated at a UTF-8 boundary. */
+static void completion_accept(linenoise_state_t *ls, size_t start, const char *cand) {
+    size_t clen = strlen(cand);
+    size_t span = ls->pos - start;
+
+    undo_save(ls);
+    memmove(ls->buf+start, ls->buf+ls->pos, ls->len-ls->pos+1);
+    ls->len -= span;
+    adjust_folds_after_delete(ls,start,span);
+    ls->pos = start;
+
+    if (clen > SIZE_MAX-ls->len || edit_grow(ls,ls->len+clen) == -1) {
+        clen = ls->buflen > ls->len ? ls->buflen - ls->len : 0;
+        while (clen > 0 && ((unsigned char)cand[clen] & 0xC0) == 0x80) clen--;
+    }
+    edit_insert_no_refresh(ls,cand,clen);
 }
 
 /* This is an helper function for linenoise_edit_*() and is called when the
@@ -798,12 +875,11 @@ static void refresh_line_with_completion(linenoise_state_t *ls, linenoise_comple
  * possible completions, and the caller should read for the next characters
  * from stdin. */
 static int complete_line(linenoise_state_t *ls, int keypressed) {
-    linenoise_completions_t lc = { 0, NULL };
-    int nwritten;
+    linenoise_completions_t lc;
     char c = keypressed;
 
-    ls->ctx->completion_callback(ls->buf,&lc);
-    if (lc.len == 0) {
+    get_completions(ls,&lc);
+    if (lc.len == 0 || range_overlaps_fold(ls,lc.start,ls->pos-lc.start)) {
         linenoise_beep();
         ls->in_completion = 0;
         c = 0; /* The key was consumed: don't insert a literal TAB. */
@@ -819,7 +895,7 @@ static int complete_line(linenoise_state_t *ls, int keypressed) {
                 }
                 c = 0;
                 break;
-            case 27: /* escape */
+            case ESC: /* lone ESC, Up or Down, see complete_line_end() */
                 /* Re-show original buffer */
                 if (ls->completion_idx < lc.len) refresh_line(ls);
                 ls->in_completion = 0;
@@ -827,12 +903,8 @@ static int complete_line(linenoise_state_t *ls, int keypressed) {
                 break;
             default:
                 /* Update buffer and return */
-                if (ls->completion_idx < lc.len) {
-                    nwritten = snprintf(ls->buf,ls->buflen,"%s",
-                        lc.cvec[ls->completion_idx]);
-                    ls->len = ls->pos = nwritten;
-                    fold_clear(ls);
-                }
+                if (ls->completion_idx < lc.len)
+                    completion_accept(ls,lc.start,lc.cvec[ls->completion_idx]);
                 ls->in_completion = 0;
                 break;
         }
@@ -847,6 +919,13 @@ static int complete_line(linenoise_state_t *ls, int keypressed) {
 
     free_completions(&lc);
     return c; /* Return last read character */
+}
+
+/* End an active completion on an escape sequence: accept the shown candidate,
+ * or restore the line as typed. */
+static void complete_line_end(linenoise_state_t *ls, int accept) {
+    if (ls->in_completion && ls->ctx->completion_callback != NULL)
+        complete_line(ls, accept ? 0 : ESC);
 }
 
 /* This function is used by the callback function registered by the user
@@ -1219,8 +1298,9 @@ static void adjust_folds_after_delete(linenoise_state_t *l, size_t pos, size_t l
  * For colors 16-255, we use the 256-color escape sequence:
  *   \x1b[38;5;Xm where X is the color number
  */
-static void ab_append_highlighted(struct abuf *ab, linenoise_highlight_cb_t *highlight,
-                                  const char *buf, size_t len) {
+static void ab_append_highlighted(struct abuf *ab, linenoise_context_t *ctx,
+                                  const char *buf, size_t len, size_t pos) {
+    linenoise_highlight_cb_t *highlight = ctx->highlight_callback;
     char seq[32];
     char *colors = NULL;
     size_t i;
@@ -1251,7 +1331,7 @@ static void ab_append_highlighted(struct abuf *ab, linenoise_highlight_cb_t *hig
     memset(colors, 0, len);
 
     /* Call the highlight callback. */
-    highlight(buf, colors, len);
+    highlight(buf, colors, len, pos, ctx->highlight_udata);
 
     /* Output text with color changes. */
     for (i = 0; i < len; i++) {
@@ -1299,7 +1379,8 @@ void refresh_show_hints(struct abuf *ab, linenoise_state_t *l, int pwidth, size_
     char seq[LINENOISE_SEQ_SIZE];
     if (l->ctx->hints_callback && pwidth + bufwidth < l->cols) {
         int color = -1, bold = 0;
-        char *hint = l->ctx->hints_callback(l->buf,&color,&bold);
+        char *hint = l->ctx->hints_callback(l->buf,l->pos,&color,&bold,
+                                            l->ctx->hints_udata);
         if (hint) {
             size_t hintlen = strlen(hint);
             size_t hintwidth = utf8StrWidth(hint, hintlen);
@@ -1326,7 +1407,8 @@ void refresh_show_hints(struct abuf *ab, linenoise_state_t *l, int pwidth, size_
             if (color != -1 || bold != 0)
                 ab_append(ab,"\033[0m",4);
             /* Call the function to free the hint returned. */
-            if (l->ctx->free_hints_callback) l->ctx->free_hints_callback(hint);
+            if (l->ctx->free_hints_callback)
+                l->ctx->free_hints_callback(hint,l->ctx->hints_udata);
         }
     }
 }
@@ -1457,7 +1539,7 @@ static void refresh_single_line(linenoise_state_t *l, int flags) {
                 i += utf8NextCharLen(buf, i, len);
             }
         } else {
-            ab_append_highlighted(&ab,l->ctx->highlight_callback,buf,len);
+            ab_append_highlighted(&ab,l->ctx,buf,len,pos);
         }
         /* Show hints if any. */
         refresh_show_hints(&ab,l,pwidth,fullwidth);
@@ -1560,7 +1642,7 @@ static void refresh_multi_line(linenoise_state_t *l, int flags) {
                 i += utf8NextCharLen(render, i, render_len);
             }
         } else {
-            ab_append_highlighted(&ab,l->ctx->highlight_callback,render,render_len);
+            ab_append_highlighted(&ab,l->ctx,render,render_len,render_pos);
         }
 
         /* Show hints if any. */
@@ -1638,6 +1720,36 @@ void linenoise_show(linenoise_state_t *l) {
     } else {
         refresh_line_with_flags(l,REFRESH_WRITE);
     }
+}
+
+/* Adopt a new terminal width and redraw the line. In multi line mode the
+ * rows on screen are assumed rewrapped to the new width, as most terminals
+ * do on resize. */
+static void set_columns(linenoise_state_t *l, int cols) {
+    if (cols <= 0 || (size_t)cols == l->cols) return;
+    l->cols = cols;
+    if (l->ctx->mlmode) {
+        char *render;
+        size_t render_len, render_pos;
+        size_t pwidth = utf8StrWidth(l->prompt, l->plen);
+        int col;
+        if (render_buffer(l,&render,&render_len,&render_pos) == 0) {
+            l->oldrows = calc_rows_with_newlines(render,render_len,l->cols,pwidth);
+            calc_cursor_pos_with_newlines(render,render_pos,render_len,
+                                          l->cols,pwidth,&l->oldrpos,&col);
+            ln_free(render);
+        }
+    }
+    if (l->in_completion) {
+        refresh_line_with_completion(l,NULL,REFRESH_ALL);
+    } else {
+        refresh_line(l);
+    }
+}
+
+/* Refetch the terminal width, when using the multiplexing API. */
+void linenoise_resize(linenoise_state_t *l) {
+    set_columns(l, get_columns(l->ifd, l->ofd));
 }
 
 /* Insert the character(s) 'c' of length 'clen' at cursor current position.
@@ -1861,11 +1973,11 @@ void linenoise_edit_delete_prev_word(linenoise_state_t *l) {
     size_t old_pos = l->pos;
     size_t diff;
 
-    /* Skip spaces before the word (move backwards by UTF-8 chars). */
-    while (l->pos > 0 && l->buf[l->pos-1] == ' ')
+    /* Skip whitespace before the word (move backwards by UTF-8 chars). */
+    while (l->pos > 0 && isspace((unsigned char)l->buf[l->pos-1]))
         l->pos -= edit_prev_len(l, l->pos);
-    /* Skip non-space characters (move backwards by UTF-8 chars). */
-    while (l->pos > 0 && l->buf[l->pos-1] != ' ')
+    /* Skip non-whitespace characters (move backwards by UTF-8 chars). */
+    while (l->pos > 0 && !isspace((unsigned char)l->buf[l->pos-1]))
         l->pos -= edit_prev_len(l, l->pos);
     diff = old_pos - l->pos;
     adjust_folds_after_delete(l,l->pos,diff);
@@ -1878,10 +1990,10 @@ void linenoise_edit_delete_prev_word(linenoise_state_t *l) {
 void linenoise_edit_move_word_left(linenoise_state_t *l) {
     if (l->pos == 0) return;
     /* Skip spaces before the word. */
-    while (l->pos > 0 && l->buf[l->pos-1] == ' ')
+    while (l->pos > 0 && isspace((unsigned char)l->buf[l->pos-1]))
         l->pos -= utf8PrevCharLen(l->buf, l->pos);
     /* Skip non-space characters. */
-    while (l->pos > 0 && l->buf[l->pos-1] != ' ')
+    while (l->pos > 0 && !isspace((unsigned char)l->buf[l->pos-1]))
         l->pos -= utf8PrevCharLen(l->buf, l->pos);
     refresh_line(l);
 }
@@ -1890,10 +2002,10 @@ void linenoise_edit_move_word_left(linenoise_state_t *l) {
 void linenoise_edit_move_word_right(linenoise_state_t *l) {
     if (l->pos >= l->len) return;
     /* Skip current word characters. */
-    while (l->pos < l->len && l->buf[l->pos] != ' ')
+    while (l->pos < l->len && !isspace((unsigned char)l->buf[l->pos]))
         l->pos += utf8NextCharLen(l->buf, l->pos, l->len);
     /* Skip spaces after the word. */
-    while (l->pos < l->len && l->buf[l->pos] == ' ')
+    while (l->pos < l->len && isspace((unsigned char)l->buf[l->pos]))
         l->pos += utf8NextCharLen(l->buf, l->pos, l->len);
     refresh_line(l);
 }
@@ -1905,10 +2017,10 @@ void linenoise_edit_delete_word_right(linenoise_state_t *l) {
 
     if (l->pos >= l->len) return;
     /* Skip current word characters. */
-    while (l->pos < l->len && l->buf[l->pos] != ' ')
+    while (l->pos < l->len && !isspace((unsigned char)l->buf[l->pos]))
         l->pos += utf8NextCharLen(l->buf, l->pos, l->len);
     /* Skip spaces after the word. */
-    while (l->pos < l->len && l->buf[l->pos] == ' ')
+    while (l->pos < l->len && isspace((unsigned char)l->buf[l->pos]))
         l->pos += utf8NextCharLen(l->buf, l->pos, l->len);
     diff = l->pos - old_pos;
     adjust_folds_after_delete(l,old_pos,diff);
@@ -2069,7 +2181,7 @@ static int edit_start(linenoise_context_t *ctx, linenoise_state_t *l, int stdin_
      * detected and folded on screen. */
     enable_bracketed_paste(l->ofd);
 
-    l->cols = get_columns(stdin_fd, stdout_fd);
+    l->cols = get_columns(l->ifd, l->ofd);
     l->oldrows = 0;
     l->oldrpos = 1;  /* Cursor starts on row 1. */
     l->history_index = 0;
@@ -2319,6 +2431,10 @@ char *linenoise_edit_feed(linenoise_state_t *l) {
         return NULL;
     }
 
+    /* Pick up a terminal resize. Only the side-effect free query runs here:
+     * the escape sequence fallback would read the user's input. */
+    set_columns(l, query_columns(l->ofd));
+
     /* Handle Tab key: on continuation lines insert spaces for indentation,
      * otherwise trigger completion if callback is set. */
     if (c == 9 && !l->in_completion) {
@@ -2341,7 +2457,8 @@ char *linenoise_edit_feed(linenoise_state_t *l) {
     /* Autocomplete when the callback is set. complete_line() returns the
      * character to be handled next, or zero when the key was consumed to
      * navigate the completions (or because there was nothing to complete). */
-    if ((l->in_completion || c == 9) && l->ctx->completion_callback != NULL) {
+    if ((l->in_completion || c == 9) && c != ESC &&
+        l->ctx->completion_callback != NULL) {
         int retval = complete_line(l,c);
         /* Read next character when 0 */
         if (retval == 0) return linenoise_edit_more;
@@ -2419,9 +2536,22 @@ char *linenoise_edit_feed(linenoise_state_t *l) {
     case ESC:    /* escape sequence */
         /* Read the next two bytes representing the escape sequence.
          * Use timeout to avoid hanging on partial sequences (e.g., user
-         * pressing ESC alone). 100ms is enough for terminal responses. */
-        if (read_byte_with_timeout(l->ifd,seq,100) != 1) break;
-        if (read_byte_with_timeout(l->ifd,seq+1,100) != 1) break;
+         * pressing ESC alone). 100ms is enough for terminal responses.
+         * Alt+key is only ESC plus one byte, so read a second byte only
+         * after ESC [ or ESC O. */
+        if (read_byte_with_timeout(l->ifd,seq,100) != 1) {
+            complete_line_end(l,0);
+            break;
+        }
+        seq[1] = 0;
+        if ((seq[0] == '[' || seq[0] == 'O') &&
+            read_byte_with_timeout(l->ifd,seq+1,100) != 1) {
+            complete_line_end(l,0);
+            break;
+        }
+        /* Up and Down leave the completion; other keys accept it first. */
+        complete_line_end(l,!((seq[0] == '[' || seq[0] == 'O') &&
+                              (seq[1] == 'A' || seq[1] == 'B')));
 
         /* ESC [ sequences. */
         if (seq[0] == '[') {
@@ -2936,13 +3066,19 @@ void linenoise_set_mouse_mode(linenoise_context_t *ctx, int enable) {
 }
 
 /* Set completion callback for a context. */
-void linenoise_set_completion_callback(linenoise_context_t *ctx, linenoise_completion_cb_t *fn) {
-    if (ctx) ctx->completion_callback = fn;
+void linenoise_set_completion_callback(linenoise_context_t *ctx, linenoise_completion_cb_t *fn, void *udata) {
+    if (ctx) {
+        ctx->completion_callback = fn;
+        ctx->completion_udata = udata;
+    }
 }
 
 /* Set hints callback for a context. */
-void linenoise_set_hints_callback(linenoise_context_t *ctx, linenoise_hints_cb_t *fn) {
-    if (ctx) ctx->hints_callback = fn;
+void linenoise_set_hints_callback(linenoise_context_t *ctx, linenoise_hints_cb_t *fn, void *udata) {
+    if (ctx) {
+        ctx->hints_callback = fn;
+        ctx->hints_udata = udata;
+    }
 }
 
 /* Set free hints callback for a context. */
@@ -2951,8 +3087,11 @@ void linenoise_set_free_hints_callback(linenoise_context_t *ctx, linenoise_free_
 }
 
 /* Set syntax highlighting callback for a context. */
-void linenoise_set_highlight_callback(linenoise_context_t *ctx, linenoise_highlight_cb_t *fn) {
-    if (ctx) ctx->highlight_callback = fn;
+void linenoise_set_highlight_callback(linenoise_context_t *ctx, linenoise_highlight_cb_t *fn, void *udata) {
+    if (ctx) {
+        ctx->highlight_callback = fn;
+        ctx->highlight_udata = udata;
+    }
 }
 
 /* Add a line to history for a context. */

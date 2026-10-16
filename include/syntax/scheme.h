@@ -32,6 +32,7 @@ void scheme_highlight_free(void);
  *   7 = white
  *   Add 8 for bold variants
  */
-void scheme_highlight_callback(const char *buf, char *colors, size_t len);
+void scheme_highlight_callback(const char *buf, char *colors, size_t len,
+                               size_t pos, void *udata);
 
 #endif /* HIGHLIGHT_SCHEME_H */

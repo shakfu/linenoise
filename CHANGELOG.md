@@ -9,6 +9,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Includes changes ported from upstream
 [antirez/linenoise](https://github.com/antirez/linenoise) (shakfu/linenoise#1).
 
+### Breaking Changes
+
+- Callbacks receive the cursor offset and a `void *udata` given to their
+  setter. Completion replaces `buf[start, pos)`, where the callback sets
+  `lc->start`, and keeps the text after the cursor. Before, a candidate
+  replaced the whole line, and callbacks had no way to reach caller state
+  except globals. Port by adding the parameters and passing `NULL` to the
+  setters. `start` defaults to 0, so a ported callback behaves as before when
+  the cursor is at the end. Design and rejected alternatives:
+  `docs/dev/callback-api.md`.
+
+  ```c
+  void completion(const char *buf, size_t pos, linenoise_completions_t *lc,
+                  void *udata);
+  linenoise_set_completion_callback(ctx, completion, NULL);
+  ```
+
 ### Added
 
 - Bracketed paste support: pasted input is recognized via `ESC[200~` /
@@ -16,6 +33,13 @@ Includes changes ported from upstream
   `[... N pasted lines ...]` placeholder while the edit buffer keeps the real
   bytes. Cursor movement steps over a folded range in a single keypress, and
   recalled history entries that contain newlines are folded again.
+- `linenoise_resize()` refetches the terminal width and redraws the line, for
+  async callers that handle `SIGWINCH`. Without it, a resize also takes effect
+  on the next key. Based on upstream PR #252, which only updated the width:
+  the line stayed garbled until the next key, and multi-line mode cleared rows
+  computed for the old width. Multi-line mode now assumes the terminal
+  rewrapped its rows to the new width, as iTerm2, kitty and VTE do; xterm does
+  not, so a shrink there can leave stale rows.
 - `utf8_ansi_escape_len()` in the UTF-8 module, used to skip ANSI CSI
   sequences when measuring display width.
 - `--ansi-prompt` option in the example program, plus test-suite coverage for
@@ -28,6 +52,9 @@ Includes changes ported from upstream
   to `LINENOISE_MAX_LINE` bytes per entry.
 - The blocking API (`linenoise_read()`) now edits in a dynamically grown
   buffer instead of a fixed 4 KB stack buffer, so large pastes fit.
+- Word movement and deletion (Ctrl+Left/Right, Alt+b/f/d, Ctrl-W,
+  Alt+Backspace) treat any whitespace as a word boundary, not only spaces. A
+  word no longer runs across a tab or a newline in a multi-line buffer.
 - `linenoise_state_t` gains `ctx` and undo-stack fields, so its size changes;
   rebuild code that allocates it. A context allows one active session: a
   second `linenoise_edit_start()` or `linenoise_read()` on it fails with
@@ -40,6 +67,24 @@ Includes changes ported from upstream
   offsets the cursor column.
 - TAB with no available completion is consumed instead of being inserted as a
   literal tab character.
+- An arrow key during TAB completion no longer inserts raw bytes such as `[D`
+  ([antirez/linenoise#248](https://github.com/antirez/linenoise/issues/248)).
+  Completion treated the ESC that starts the sequence as a lone ESC and
+  consumed it. Up, Down and a lone ESC now restore the typed line. Other keys
+  accept the candidate and then act. This follows upstream PR #263 over #255,
+  which cancelled on every arrow. Unlike #263, it reuses the existing 100 ms
+  escape timeout instead of a 1 ms `poll()`, which is not available on MSVC.
+- The terminal width is read from the session's output fd. It was read from
+  fd 1, and the escape sequence fallback received the caller's `-1` defaults
+  instead of the resolved fds, so it always failed and assumed 80 columns.
+- Accepting a completion longer than a fixed buffer no longer sets `len` past
+  the buffer. The length came from `snprintf()`'s return value, which counts
+  the untruncated string. Candidates are now truncated at a UTF-8 boundary.
+- Alt+b, Alt+f, Alt+d and Alt+Backspace act at once. The escape parser waited
+  for a third byte that a two-byte Alt sequence never sends. So the key did
+  nothing until the 100 ms timeout. If another key arrived first, its first
+  byte was swallowed. When that byte was the ESC of a second Alt key, the
+  letter was inserted as text.
 - The test suite's VT100 emulator now honors `ESC[0K` and ignores private mode
   sequences such as `ESC[?2004h`.
 - Contexts are now independent. Each session copied its context into

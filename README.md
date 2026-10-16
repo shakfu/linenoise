@@ -117,20 +117,26 @@ linenoise_history_load(ctx, "~/.myapp_history");
 ### Tab Completion
 
 ```c
-void completion_callback(const char *buf, linenoise_completions_t *lc) {
-    if (buf[0] == 'h') {
+/* Complete the word before the cursor. */
+void completion_callback(const char *buf, size_t pos,
+                         linenoise_completions_t *lc, void *udata) {
+    size_t start = pos;
+    while (start > 0 && buf[start-1] != ' ') start--;
+    lc->start = start;  /* Candidates replace buf[start, pos). */
+    if (start < pos && buf[start] == 'h') {
         linenoise_add_completion(lc, "hello");
         linenoise_add_completion(lc, "help");
     }
 }
 
-linenoise_set_completion_callback(ctx, completion_callback);
+linenoise_set_completion_callback(ctx, completion_callback, NULL);
 ```
 
 ### Hints
 
 ```c
-char *hints_callback(const char *buf, int *color, int *bold) {
+char *hints_callback(const char *buf, size_t pos, int *color, int *bold,
+                     void *udata) {
     if (strcmp(buf, "git") == 0) {
         *color = 35;  // Magenta
         *bold = 0;
@@ -139,13 +145,14 @@ char *hints_callback(const char *buf, int *color, int *bold) {
     return NULL;
 }
 
-linenoise_set_hints_callback(ctx, hints_callback);
+linenoise_set_hints_callback(ctx, hints_callback, NULL);
 ```
 
 ### Syntax Highlighting
 
 ```c
-void highlight_callback(const char *buf, char *colors, size_t len) {
+void highlight_callback(const char *buf, char *colors, size_t len,
+                        size_t pos, void *udata) {
     for (size_t i = 0; i < len; i++) {
         if (isdigit(buf[i])) {
             colors[i] = 3;  // Yellow for numbers
@@ -153,7 +160,7 @@ void highlight_callback(const char *buf, char *colors, size_t len) {
     }
 }
 
-linenoise_set_highlight_callback(ctx, highlight_callback);
+linenoise_set_highlight_callback(ctx, highlight_callback, NULL);
 ```
 
 Color values: 0=default, 1=red, 2=green, 3=yellow, 4=blue, 5=magenta, 6=cyan, 7=white. Add 8 for bold.

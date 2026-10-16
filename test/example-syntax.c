@@ -26,7 +26,7 @@
 
 typedef int (*highlight_init_fn)(void);
 typedef void (*highlight_free_fn)(void);
-typedef void (*highlight_callback_fn)(const char *, char *, size_t);
+typedef void (*highlight_callback_fn)(const char *, char *, size_t, size_t, void *);
 
 typedef struct {
     const char *name;
@@ -219,7 +219,7 @@ int main(int argc, char **argv) {
     linenoise_set_multiline(ctx, 1);
 
     /* Set highlight callback */
-    linenoise_set_highlight_callback(ctx, lang->callback);
+    linenoise_set_highlight_callback(ctx, lang->callback, NULL);
 
     /* Print header */
     printf("Syntax highlighting test for: %s\n", lang->name);

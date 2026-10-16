@@ -184,34 +184,47 @@ linenoise_history_load(ctx, "~/.myapp_history");
 ### Setting Up Completion
 
 ```c
-void completion_callback(const char *buf, linenoise_completions_t *lc) {
-    // buf contains what the user has typed so far
-    if (buf[0] == 'h') {
-        linenoise_add_completion(lc, "hello");
-        linenoise_add_completion(lc, "hello world");
-        linenoise_add_completion(lc, "help");
-    }
+// buf is the whole line, pos the cursor as a byte offset.
+void completion_callback(const char *buf, size_t pos,
+                         linenoise_completions_t *lc, void *udata) {
+    struct symtab *tab = udata;  // From the setter.
+    size_t start = pos;
+    while (start > 0 && buf[start-1] != ' ') start--;
+    lc->start = start;  // Candidates replace buf[start, pos).
+    for (size_t i = 0; i < tab->n; i++)
+        if (!strncmp(tab->names[i], buf + start, pos - start))
+            linenoise_add_completion(lc, tab->names[i]);
 }
 
-linenoise_set_completion_callback(ctx, completion_callback);
+linenoise_set_completion_callback(ctx, completion_callback, &symtab);
 ```
 
 ### Completion Behavior
 
 - Press TAB to trigger completion
 - If multiple completions exist, cycle through them with TAB
+- Press ESC, Up or Down to restore the line as typed
 - Press any other key to accept the current completion
+- Accepting replaces `buf[start, pos)` with the candidate and keeps the text
+  after the cursor. `start` defaults to 0, which replaces everything before
+  the cursor.
+- A `start` past the cursor is treated as the cursor. A span that overlaps a
+  folded paste is refused with a beep.
 
 ---
 
 ## Hints
 
-Hints appear to the right of the cursor as the user types, showing suggestions or help text.
+Hints appear after the end of the line as the user types, showing suggestions or help text.
 
 ### Setting Up Hints
 
 ```c
-char *hints_callback(const char *buf, int *color, int *bold) {
+char *hints_callback(const char *buf, size_t pos, int *color, int *bold,
+                     void *udata) {
+    // The hint is drawn after the end of the line. Use pos to skip
+    // hints while the cursor is mid-line.
+    if (pos != strlen(buf)) return NULL;
     if (strcmp(buf, "git") == 0) {
         *color = 35;  // Magenta (ANSI color code)
         *bold = 0;
@@ -220,12 +233,13 @@ char *hints_callback(const char *buf, int *color, int *bold) {
     return NULL;  // No hint
 }
 
-void free_hints_callback(void *hint) {
+void free_hints_callback(void *hint, void *udata) {
     // Only needed if hints_callback allocates memory
     // For static strings, this can be NULL
+    // udata is the pointer given to linenoise_set_hints_callback()
 }
 
-linenoise_set_hints_callback(ctx, hints_callback);
+linenoise_set_hints_callback(ctx, hints_callback, NULL);
 linenoise_set_free_hints_callback(ctx, free_hints_callback);  // Optional
 ```
 
@@ -249,8 +263,10 @@ Add real-time syntax highlighting to input.
 ### Setting Up Highlighting
 
 ```c
-void highlight_callback(const char *buf, char *colors, size_t len) {
+void highlight_callback(const char *buf, char *colors, size_t len,
+                        size_t pos, void *udata) {
     // colors array is pre-zeroed (0 = default color)
+    // buf is the displayed text: folded pastes appear as placeholders
     // Fill it with color codes for each byte position
 
     for (size_t i = 0; i < len; i++) {
@@ -262,7 +278,7 @@ void highlight_callback(const char *buf, char *colors, size_t len) {
     }
 }
 
-linenoise_set_highlight_callback(ctx, highlight_callback);
+linenoise_set_highlight_callback(ctx, highlight_callback, NULL);
 ```
 
 ### Color Values
@@ -283,7 +299,8 @@ Add 8 to any color for bold (e.g., 9 = bold red).
 ### Example: Keyword Highlighting
 
 ```c
-void highlight_callback(const char *buf, char *colors, size_t len) {
+void highlight_callback(const char *buf, char *colors, size_t len,
+                        size_t pos, void *udata) {
     const char *keywords[] = {"if", "else", "while", "for", "return", NULL};
 
     for (size_t i = 0; i < len; ) {
@@ -358,6 +375,17 @@ printf("Status update!\n");
 linenoise_show(&state);   // Redraw the prompt
 ```
 
+### Terminal Resize
+
+The width is rechecked with the window size ioctl on every key. To redraw at
+once, call `linenoise_resize()` from your event loop after `SIGWINCH`:
+
+```c
+linenoise_resize(&state);  // Refetch the width and redraw
+```
+
+Do not call it from the signal handler itself.
+
 ---
 
 ## Dynamic Buffers
@@ -409,6 +437,8 @@ linenoise_edit_move_word_right(&state);  // Ctrl+Right, Alt+f
 // Delete word
 linenoise_edit_delete_word_right(&state); // Alt+d
 ```
+
+Any whitespace (space, tab, newline) separates words.
 
 ---
 
@@ -670,7 +700,8 @@ int your_highlight_init(void) {
     return 0;
 }
 
-void your_highlight_callback(const char *buf, char *colors, size_t len) {
+void your_highlight_callback(const char *buf, char *colors, size_t len,
+                             size_t pos, void *udata) {
     TSTree *tree = ts_parser_parse_string(parser, NULL, buf, (uint32_t)len);
     TSNode root = ts_tree_root_node(tree);
 

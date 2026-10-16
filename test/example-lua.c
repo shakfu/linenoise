@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include "linenoise.h"
 #include "syntax/lua.h"
 
@@ -25,57 +26,31 @@ static const char *lua_builtins[] = {
     "setmetatable", "tonumber", "tostring", "type", "xpcall", NULL
 };
 
-void completion(const char *buf, linenoise_completions_t *lc) {
-    size_t buflen = strlen(buf);
-    const char **words;
+/* Complete the identifier before the cursor. Only that word is replaced. */
+void completion(const char *buf, size_t pos, linenoise_completions_t *lc,
+                void *udata) {
+    const char **lists[] = { lua_keywords, lua_builtins };
+    size_t start = pos;
+    (void)udata;
 
-    if (buflen == 0) return;
-
-    /* Find the start of the current word */
-    const char *word_start = buf + buflen;
-    while (word_start > buf && (word_start[-1] == '_' ||
-           (word_start[-1] >= 'a' && word_start[-1] <= 'z') ||
-           (word_start[-1] >= 'A' && word_start[-1] <= 'Z') ||
-           (word_start[-1] >= '0' && word_start[-1] <= '9'))) {
-        word_start--;
+    while (start > 0 && (buf[start-1] == '_' ||
+           isalnum((unsigned char)buf[start-1]))) {
+        start--;
     }
+    if (start == pos) return;
+    lc->start = start;
 
-    size_t word_len = (size_t)(buf + buflen - word_start);
-    if (word_len == 0) return;
-
-    /* Try keywords */
-    for (words = lua_keywords; *words; words++) {
-        if (strncmp(word_start, *words, word_len) == 0) {
-            /* Build completion: prefix + completed word */
-            size_t prefix_len = (size_t)(word_start - buf);
-            size_t comp_len = prefix_len + strlen(*words);
-            char *comp = malloc(comp_len + 1);
-            if (comp) {
-                memcpy(comp, buf, prefix_len);
-                strcpy(comp + prefix_len, *words);
-                linenoise_add_completion(lc, comp);
-                free(comp);
-            }
-        }
-    }
-
-    /* Try built-in functions */
-    for (words = lua_builtins; *words; words++) {
-        if (strncmp(word_start, *words, word_len) == 0) {
-            size_t prefix_len = (size_t)(word_start - buf);
-            size_t comp_len = prefix_len + strlen(*words);
-            char *comp = malloc(comp_len + 1);
-            if (comp) {
-                memcpy(comp, buf, prefix_len);
-                strcpy(comp + prefix_len, *words);
-                linenoise_add_completion(lc, comp);
-                free(comp);
-            }
+    for (size_t i = 0; i < sizeof(lists)/sizeof(lists[0]); i++) {
+        for (const char **w = lists[i]; *w; w++) {
+            if (strncmp(buf + start, *w, pos - start) == 0)
+                linenoise_add_completion(lc, *w);
         }
     }
 }
 
-char *hints(const char *buf, int *color, int *bold) {
+char *hints(const char *buf, size_t pos, int *color, int *bold, void *udata) {
+    (void)pos;
+    (void)udata;
     /* Show hints for common Lua constructs */
     if (strcmp(buf, "function") == 0) {
         *color = 90; /* Dark gray */
@@ -162,9 +137,9 @@ int main(int argc, char **argv) {
     }
 
     /* Set callbacks */
-    linenoise_set_completion_callback(ctx, completion);
-    linenoise_set_hints_callback(ctx, hints);
-    linenoise_set_highlight_callback(ctx, lua_highlight_callback);
+    linenoise_set_completion_callback(ctx, completion, NULL);
+    linenoise_set_hints_callback(ctx, hints, NULL);
+    linenoise_set_highlight_callback(ctx, lua_highlight_callback, NULL);
 
     /* Load history */
     linenoise_history_load(ctx, ".lua_history");

@@ -32,6 +32,7 @@ void haskell_highlight_free(void);
  *   7 = white
  *   Add 8 for bold variants
  */
-void haskell_highlight_callback(const char *buf, char *colors, size_t len);
+void haskell_highlight_callback(const char *buf, char *colors, size_t len,
+                                size_t pos, void *udata);
 
 #endif /* HIGHLIGHT_HASKELL_H */

@@ -20,6 +20,7 @@ void markdown_highlight_free(void);
 
 /* Syntax highlighting callback for linenoise.
  * Can be passed to linenoise_set_highlight_callback(). */
-void markdown_highlight_callback(const char *buf, char *colors, size_t len);
+void markdown_highlight_callback(const char *buf, char *colors, size_t len,
+                                 size_t pos, void *udata);
 
 #endif /* HIGHLIGHT_MARKDOWN_H */

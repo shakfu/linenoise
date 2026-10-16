@@ -170,7 +170,10 @@ void forth_highlight_free(void) {
     }
 }
 
-void forth_highlight_callback(const char *buf, char *colors, size_t len) {
+void forth_highlight_callback(const char *buf, char *colors, size_t len,
+                              size_t pos, void *udata) {
+    (void)pos;
+    (void)udata;
     TSTree *tree;
     TSNode root;
     TSQueryMatch match;

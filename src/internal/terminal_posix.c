@@ -128,8 +128,8 @@ int terminal_enable_raw(linenoise_terminal_t *term) {
     raw.c_cc[VMIN] = 1;
     raw.c_cc[VTIME] = 0;
 
-    /* Put terminal in raw mode after flushing. */
-    if (tcsetattr(term->input_fd, TCSAFLUSH, &raw) < 0) {
+    /* Put terminal in raw mode. TCSADRAIN keeps unread input. */
+    if (tcsetattr(term->input_fd, TCSADRAIN, &raw) < 0) {
         errno = ENOTTY;
         return -1;
     }
@@ -148,7 +148,7 @@ int terminal_disable_raw(linenoise_terminal_t *term) {
     }
 
     if (term->rawmode) {
-        if (tcsetattr(term->input_fd, TCSAFLUSH, &term->orig_termios) != -1) {
+        if (tcsetattr(term->input_fd, TCSADRAIN, &term->orig_termios) != -1) {
             term->rawmode = 0;
             return 0;
         }

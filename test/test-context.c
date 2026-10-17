@@ -3,14 +3,21 @@
  * Drives the non-blocking API through pipes (LINENOISE_ASSUME_TTY) to check
  * that callbacks, history, undo and settings stay with their own context
  * when several sessions are active at once, or on separate threads.
+ * test_typeahead_kept() instead uses a real pty, so raw mode is entered.
  */
 
+#define _XOPEN_SOURCE 600   /* posix_openpt() and friends */
+#define _DARWIN_C_SOURCE    /* keep BSD api visible on macOS */
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <poll.h>
+#include <termios.h>
+#include <sys/ioctl.h>
 #include "linenoise.h"
 
 static int tests_run = 0;
@@ -406,6 +413,61 @@ static void test_word_keys(void) {
     linenoise_context_destroy(ctx);
 }
 
+/* Lines typed while no session runs reach the tty in cooked mode, where
+ * ICRNL turns Enter into \n. Each must come back as its own line. */
+static void test_typeahead_kept(void) {
+    const char *keys = "first\rsecond\r";
+    int master = posix_openpt(O_RDWR | O_NOCTTY);
+    CHECK(master != -1 && grantpt(master) == 0 && unlockpt(master) == 0,
+          "pty setup failed");
+    if (master == -1) return;
+    int slave = open(ptsname(master), O_RDWR | O_NOCTTY | O_NONBLOCK);
+    CHECK(slave != -1, "open pty slave failed");
+    if (slave == -1) { close(master); return; }
+    fcntl(master, F_SETFL, O_NONBLOCK);
+
+    struct termios t;
+    tcgetattr(slave, &t);
+    t.c_iflag |= ICRNL;
+    t.c_lflag |= ICANON;
+    tcsetattr(slave, TCSANOW, &t);
+    CHECK(write(master, keys, strlen(keys)) == (ssize_t)strlen(keys), "write keys");
+
+    /* The line discipline queues input asynchronously; wait until it has. */
+    int queued = 0;
+    for (int i = 0; i < 100 && queued < (int)strlen(keys); i++) {
+        ioctl(slave, FIONREAD, &queued);
+        if (queued < (int)strlen(keys)) usleep(10000);
+    }
+    CHECK(queued == (int)strlen(keys), "queued %d bytes", queued);
+
+    unsetenv("LINENOISE_ASSUME_TTY");
+    linenoise_context_t *ctx = linenoise_context_create();
+    const char *want[] = {"first", "second"};
+    for (int n = 0; n < 2; n++) {
+        linenoise_state_t st;
+        char buf[64], junk[4096];
+        char *line = linenoise_edit_more;
+        int started = linenoise_edit_start(ctx, &st, slave, slave, buf, sizeof(buf), "> ") == 0;
+        CHECK(started, "edit_start %d: errno=%d", n, errno);
+        if (!started) break;
+        for (int i = 0; i < 64 && line == linenoise_edit_more; i++) {
+            line = linenoise_edit_feed(&st);
+            while (read(master, junk, sizeof(junk)) > 0) {}  /* drain output */
+        }
+        linenoise_edit_stop(&st);
+        int ok = line && line != linenoise_edit_more && strcmp(line, want[n]) == 0;
+        CHECK(ok, "line %d: got \"%s\", want \"%s\"", n,
+              line == linenoise_edit_more ? "(more)" : line ? line : "(null)", want[n]);
+        if (line && line != linenoise_edit_more) linenoise_free(line);
+        if (!ok) break;
+    }
+    linenoise_context_destroy(ctx);
+    setenv("LINENOISE_ASSUME_TTY", "1", 1);
+    close(slave);
+    close(master);
+}
+
 /* Each thread runs many sessions on its own context. */
 #define THREAD_ITERS 200
 
@@ -491,6 +553,7 @@ int main(void) {
     test_completion_span();
     test_completion_fixed_buffer();
     test_word_keys();
+    test_typeahead_kept();
     test_threads_separate_contexts();
 
     printf("test-context: %d checks, %d failed\n", tests_run, tests_failed);

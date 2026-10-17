@@ -358,6 +358,7 @@ enum KEY_ACTION{
 	CTRL_F = 6,         /* Ctrl-f */
 	CTRL_H = 8,         /* Ctrl-h */
 	TAB = 9,            /* Tab */
+	CTRL_J = 10,        /* Ctrl-j, newline */
 	CTRL_K = 11,        /* Ctrl+k */
 	CTRL_L = 12,        /* Ctrl+l */
 	ENTER = 13,         /* Enter */
@@ -538,7 +539,7 @@ static int enable_raw_mode(linenoise_context_t *ctx, int fd) {
         return 0;
     }
 
-    if (!isatty(STDIN_FILENO)) goto fatal;
+    if (!isatty(fd)) goto fatal;
     if (!atexit_registered) {
         atexit(linenoise_at_exit);
         atexit_registered = 1;
@@ -560,8 +561,8 @@ static int enable_raw_mode(linenoise_context_t *ctx, int fd) {
      * We want read to return every single byte, without timeout. */
     raw.c_cc[VMIN] = 1; raw.c_cc[VTIME] = 0; /* 1 byte, no timer */
 
-    /* put terminal in raw mode after flushing */
-    if (tcsetattr(fd,TCSAFLUSH,&raw) < 0) goto fatal;
+    /* put terminal in raw mode; TCSADRAIN keeps unread input */
+    if (tcsetattr(fd,TCSADRAIN,&raw) < 0) goto fatal;
     ctx->rawmode = 1;
     ctx->raw_fd = fd;
     raw_ctx = ctx;
@@ -579,7 +580,7 @@ static void disable_raw_mode(linenoise_context_t *ctx) {
         return;
     }
     /* Don't even check the return value as it's too late. */
-    if (ctx->rawmode && tcsetattr(ctx->raw_fd,TCSAFLUSH,&ctx->orig_termios) != -1)
+    if (ctx->rawmode && tcsetattr(ctx->raw_fd,TCSADRAIN,&ctx->orig_termios) != -1)
         ctx->rawmode = 0;
     if (raw_ctx == ctx) raw_ctx = NULL;
 }
@@ -2467,6 +2468,7 @@ char *linenoise_edit_feed(linenoise_state_t *l) {
 
     switch(c) {
     case ENTER:    /* enter */
+    case CTRL_J:   /* typeahead queued in cooked mode, where ICRNL made Enter \n */
         history_drop_placeholder(l);
         if (l->ctx->mlmode) linenoise_edit_move_end(l);
         if (l->ctx->hints_callback) {

@@ -59,9 +59,19 @@ Includes changes ported from upstream
   rebuild code that allocates it. A context allows one active session: a
   second `linenoise_edit_start()` or `linenoise_read()` on it fails with
   `LINENOISE_ERR_INVALID`.
+- `\n` (Ctrl-J) accepts the line, as in readline, instead of being inserted.
+  Input typed while no prompt is active is queued in cooked mode, where
+  `ICRNL` turns Enter into `\n`. Without this, the lines that the `TCSADRAIN`
+  fix keeps would merge into one.
 
 ### Fixed
 
+- Lines typed while no prompt is active are no longer lost. Entering and
+  leaving raw mode used `TCSAFLUSH`, which discards unread input; `TCSADRAIN`
+  keeps it. Inherited from upstream. `test-context` now covers this on a real
+  pty.
+- Raw mode checked whether stdin was a tty, not the input fd passed to
+  `linenoise_edit_start()`, so a session on another tty failed with `ENOTTY`.
 - ANSI CSI escape sequences (for example color codes in the prompt) are treated
   as zero-width when computing display widths, so a colored prompt no longer
   offsets the cursor column.
